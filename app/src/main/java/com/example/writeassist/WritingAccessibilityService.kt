@@ -31,6 +31,7 @@ class WritingAccessibilityService : AccessibilityService() {
     }
     private val handler = Handler(Looper.getMainLooper())
     private var manager: WindowManager? = null
+    private var lastEditableEventNode: AccessibilityNodeInfo? = null
     private var bubble: LinearLayout? = null
     private var title: TextView? = null
     private var suggestion: TextView? = null
@@ -78,18 +79,31 @@ class WritingAccessibilityService : AccessibilityService() {
             event.eventType == AccessibilityEvent.TYPE_VIEW_FOCUSED ||
             event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
             event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
+            if (event.eventType == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED ||
+                event.eventType == AccessibilityEvent.TYPE_VIEW_FOCUSED) {
+                val source = event.source
+                if (source?.isEditable == true && !isSensitive(source)) {
+                    lastEditableEventNode?.recycle()
+                    lastEditableEventNode = AccessibilityNodeInfo.obtain(source)
+                }
+                source?.recycle()
+            }
             handler.removeCallbacks(refresh)
             handler.removeCallbacks(autoCheck)
-            handler.postDelayed(refresh, 450)
+            handler.postDelayed(refresh, if (event.eventType == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED) 250 else 450)
         }
     }
 
     private fun editableNode(): AccessibilityNodeInfo? {
-        val root = rootInActiveWindow ?: return null
-        val focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
-        if (focused?.isEditable == true) return focused
+        val root = rootInActiveWindow
+        val focused = root?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+        if (focused?.isEditable == true && !isSensitive(focused)) return focused
         focused?.recycle()
-        return null
+        val cached = lastEditableEventNode ?: return null
+        return try {
+            if (!cached.refresh() || !cached.isEditable || isSensitive(cached)) null
+            else AccessibilityNodeInfo.obtain(cached)
+        } catch (_: Exception) { null }
     }
 
     private fun isSensitive(node: AccessibilityNodeInfo): Boolean {
@@ -415,6 +429,8 @@ class WritingAccessibilityService : AccessibilityService() {
     override fun onInterrupt() { hideBubble() }
     override fun onDestroy() {
         handler.removeCallbacksAndMessages(null)
+        lastEditableEventNode?.recycle()
+        lastEditableEventNode = null
         aiWorker.shutdownNow()
         hideBubble()
         instance = null
