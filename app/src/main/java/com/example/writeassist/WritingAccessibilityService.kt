@@ -58,6 +58,8 @@ class WritingAccessibilityService : AccessibilityService() {
     private var dismissedKey = ""
     private val ignoredSuggestions = mutableSetOf<String>()
     private var reviewTab = true
+    private var bubbleX = -1
+    private var bubbleY = -1
     private var expanded = false
     private var activeEdits: List<SuggestionDiff.Edit> = emptyList()
     private var editIndex = 0
@@ -318,8 +320,8 @@ class WritingAccessibilityService : AccessibilityService() {
         val params = bubbleParams ?: return
         params.width = if (expanded) (resources.displayMetrics.widthPixels - dp(32)).coerceAtMost(dp(430)) else dp(52)
         params.gravity = if (expanded) Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL else Gravity.TOP or Gravity.START
-        params.x = if (expanded) 0 else dp(8)
-        params.y = if (expanded) dp(12) else (resources.displayMetrics.heightPixels * 0.48f).toInt()
+        params.x = if (expanded) 0 else bubbleX.takeIf { it >= 0 } ?: dp(8)
+        params.y = if (expanded) dp(12) else bubbleY.takeIf { it >= 0 } ?: (resources.displayMetrics.heightPixels * 0.48f).toInt()
         params.height = WindowManager.LayoutParams.WRAP_CONTENT
         try { manager?.updateViewLayout(view, params) } catch (_: Exception) {}
     }
@@ -524,6 +526,11 @@ class WritingAccessibilityService : AccessibilityService() {
         if (bubble != null && overlayTheme != theme) hideBubble()
         if (bubble != null) return
         overlayTheme = theme
+        if (bubbleX < 0) {
+            val saved = getSharedPreferences("bubble_position", MODE_PRIVATE)
+            bubbleX = saved.getInt("x", dp(8))
+            bubbleY = saved.getInt("y", (resources.displayMetrics.heightPixels * 0.48f).toInt())
+        }
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             background = rounded(if (dark) Color.rgb(30, 38, 39) else Color.WHITE)
@@ -539,10 +546,7 @@ class WritingAccessibilityService : AccessibilityService() {
             setOnClickListener {
                 expanded = !expanded
                 if (expanded) reviewTab = true
-                if (expanded) renderAssistantPanel() else {
-                    renderAssistantPanel()
-                    renderCurrentSuggestion()
-                }
+                renderAssistantPanel()
                 resizeBubble()
             }
         }
@@ -626,29 +630,51 @@ class WritingAccessibilityService : AccessibilityService() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = dp(8)
-            y = (resources.displayMetrics.heightPixels * 0.48f).toInt()
+            x = bubbleX
+            y = bubbleY
         }
         var downX = 0f
         var downY = 0f
         var startX = 0
         var startY = 0
+        var dragging = false
         heading.setOnTouchListener { _, event ->
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
-                    downX = event.rawX; downY = event.rawY
-                    startX = params.x; startY = params.y
-                    false
+                    downX = event.rawX
+                    downY = event.rawY
+                    startX = params.x
+                    startY = params.y
+                    dragging = false
+                    true
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    if (!expanded && (kotlin.math.abs(event.rawX - downX) > dp(8) ||
-                        kotlin.math.abs(event.rawY - downY) > dp(8))) {
-                        params.x = (startX + event.rawX - downX).toInt().coerceAtLeast(0)
-                        params.y = (startY + event.rawY - downY).toInt().coerceAtLeast(0)
+                    if (!expanded && (dragging ||
+                        kotlin.math.abs(event.rawX - downX) > dp(5) ||
+                        kotlin.math.abs(event.rawY - downY) > dp(5))) {
+                        dragging = true
+                        val maxX = (resources.displayMetrics.widthPixels - dp(52)).coerceAtLeast(0)
+                        val maxY = (resources.displayMetrics.heightPixels - dp(80)).coerceAtLeast(0)
+                        params.x = (startX + event.rawX - downX).toInt().coerceIn(0, maxX)
+                        params.y = (startY + event.rawY - downY).toInt().coerceIn(0, maxY)
                         try { manager?.updateViewLayout(box, params) } catch (_: Exception) {}
-                        true
-                    } else false
+                    }
+                    true
                 }
+                MotionEvent.ACTION_UP -> {
+                    if (dragging) {
+                        bubbleX = params.x
+                        bubbleY = params.y
+                        getSharedPreferences("bubble_position", MODE_PRIVATE).edit()
+                            .putInt("x", bubbleX).putInt("y", bubbleY).apply()
+                    } else {
+                        expanded = !expanded
+                        if (expanded) reviewTab = true
+                        renderAssistantPanel()
+                    }
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> true
                 else -> false
             }
         }
