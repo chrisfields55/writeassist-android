@@ -28,8 +28,8 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
-      - name: Build debug APK
-        run: gradle --no-daemon :app:assembleDebug
+      - name: Test, lint, and build debug APK
+        run: gradle --no-daemon :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
       - name: Check stable signing configuration
         env:
           KEYSTORE_B64: ${{ secrets.WRITEASSIST_KEYSTORE_BASE64 }}
@@ -53,7 +53,9 @@ jobs:
           if [ -n "$KEYSTORE_B64" ] && [ -n "$WRITEASSIST_KEYSTORE_PASSWORD" ] && [ -n "$WRITEASSIST_KEY_ALIAS" ] && [ -n "$WRITEASSIST_KEY_PASSWORD" ]; then
             echo "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/writeassist-release.jks"
             export WRITEASSIST_KEYSTORE_PATH="$RUNNER_TEMP/writeassist-release.jks"
+            trap 'rm -f "$WRITEASSIST_KEYSTORE_PATH"' EXIT
             gradle --no-daemon :app:assembleRelease
+            "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs app/build/outputs/apk/release/app-release.apk
           else
             echo "Release APK skipped until stable signing secrets are configured."
           fi

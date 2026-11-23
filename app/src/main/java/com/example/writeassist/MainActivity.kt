@@ -41,8 +41,6 @@ class MainActivity : Activity() {
     private var processText = false
     private var readonly = true
     private var lastResultReady = false
-    private var sourceFromAccessibility: String? = null
-    private var sourcePackage: String? = null
 
     private val ink get() = if (AppTheme.isDark(this@MainActivity)) Color.rgb(231, 240, 236) else Color.rgb(30, 41, 59)
     private val muted get() = if (AppTheme.isDark(this@MainActivity)) Color.rgb(168, 184, 178) else Color.rgb(100, 116, 139)
@@ -107,10 +105,7 @@ class MainActivity : Activity() {
             View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
         processText = intent?.action == Intent.ACTION_PROCESS_TEXT
         readonly = intent?.getBooleanExtra(Intent.EXTRA_PROCESS_TEXT_READONLY, true) ?: true
-        val accessibilityIncoming = intent?.getStringExtra("accessibility_text")
-        sourceFromAccessibility = accessibilityIncoming
-        sourcePackage = WritingAccessibilityService.capturedPackage
-        val incoming = accessibilityIncoming ?: when (intent?.action) {
+        val incoming = when (intent?.action) {
             Intent.ACTION_PROCESS_TEXT -> intent.getCharSequenceExtra(Intent.EXTRA_PROCESS_TEXT)?.toString()
             Intent.ACTION_SEND -> intent.getStringExtra(Intent.EXTRA_TEXT)
             else -> null
@@ -225,29 +220,6 @@ class MainActivity : Activity() {
                 }
             })
         }
-        if (sourceFromAccessibility != null) {
-            addSpace(results, 10)
-            results.addView(action("Apply correction to original app", true) {
-                val original = sourceFromAccessibility
-                val pkg = sourcePackage
-                val service = WritingAccessibilityService.instance
-                if (!lastResultReady || original == null || pkg == null || output.text.isBlank()) {
-                    status.text = "Generate a revision first."
-                } else if (service == null) {
-                    status.text = "Enable WriteAssist in Accessibility settings."
-                } else {
-                    val replacement = output.text.toString()
-                    status.text = "Returning to the original app…"
-                    moveTaskToBack(true)
-                    main.postDelayed({
-                        val success = service.applyReplacement(original, replacement, pkg)
-                        status.text = if (success) "Correction applied." else
-                            "Automatic replacement unavailable. Copy the result instead."
-                        if (success) sourceFromAccessibility = null
-                    }, 900)
-                }
-            })
-        }
         addSpace(root, 18)
         root.addView(label("WriteAssist • Automatic AI is optional", 12f, muted).apply {
             gravity = Gravity.CENTER
@@ -298,9 +270,19 @@ class MainActivity : Activity() {
         val auto = Switch(this).apply {
             text = "Automatically check writing with AI"
             textSize = 14f
-            isChecked = prefs.getBoolean("auto_ai", true)
+            isChecked = prefs.getBoolean("auto_ai", false)
+        }
+        val enabled = Switch(this).apply {
+            text = "Floating writing assistant"
+            isChecked = AssistantControls.enabled(this@MainActivity)
+        }
+        val notification = Switch(this).apply {
+            text = "Show pause and resume notification"
+            isChecked = prefs.getBoolean(AssistantControls.NOTIFICATION, false)
         }
         addSpace(panel, 14)
+        panel.addView(enabled)
+        panel.addView(notification)
         panel.addView(auto)
         addSpace(panel, 10)
         panel.addView(label("When enabled, supported text fields are checked after a pause in typing. Text is sent to Google Gemini automatically. Suggestions are never applied without your approval. Password fields are excluded. You may disable this at any time.", 12f, muted))
@@ -308,15 +290,21 @@ class MainActivity : Activity() {
         if (parent is ViewGroup) parent.removeView(panel)
         android.app.AlertDialog.Builder(this)
             .setTitle("WriteAssist settings")
-            .setView(panel)
+            .setView(android.widget.ScrollView(this).apply { addView(panel) })
             .setPositiveButton("Save settings") { _, _ ->
                 prefs.edit().putString("endpoint", endpoint.text.toString().trim())
                     .putString("model", model.text.toString().trim())
                     .putBoolean("auto_ai", auto.isChecked)
+                    .putBoolean(AssistantControls.NOTIFICATION, notification.isChecked)
                     .putString("appearance", arrayOf("system", "light", "dark")[appearance.selectedItemPosition]).apply()
-                recreate()
+                AssistantControls.setEnabled(this, enabled.isChecked)
                 try { ApiCredentials.save(this, apiKey.text.toString().trim()) }
                 catch (_: Exception) { Toast.makeText(this, "Unable to store API key securely", Toast.LENGTH_LONG).show() }
+                if (notification.isChecked && android.os.Build.VERSION.SDK_INT >= 33 &&
+                    checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) !=
+                    android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                    requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 23)
+                } else recreate()
             }
             .setNegativeButton("Close", null)
             .show()
@@ -352,6 +340,14 @@ class MainActivity : Activity() {
                     result.notice + " Offline checks are limited to common errors."
                 else "Reviewed with " + result.source + ". Review before applying."
             }
+        }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 23) {
+            if (AssistantControls.serviceEnabled(this)) AssistantControls.updateNotification(this)
+            recreate()
         }
     }
 

@@ -9,7 +9,7 @@ object SuggestionDiff {
         val a = Regex("\\S+|\\s+").findAll(original).map { it.value }.toList()
         val b = Regex("\\S+|\\s+").findAll(corrected).map { it.value }.toList()
         // Avoid quadratic work for large drafts. A single replacement is still safe.
-        if (a.size * b.size > 40000) return listOf(Edit(0, original.length, original, corrected))
+        if (a.size.toLong() * b.size > 160000) return listOf(Edit(0, original.length, original, corrected))
         val dp = Array(a.size + 1) { IntArray(b.size + 1) }
         for (i in a.size - 1 downTo 0) for (j in b.size - 1 downTo 0)
             dp[i][j] = if (a[i] == b[j]) dp[i + 1][j + 1] + 1
@@ -45,6 +45,16 @@ object SuggestionDiff {
         }
         flush()
         return edits
+    }
+
+    fun mapOffset(offset: Int, edit: Edit?, length: Int): Int {
+        val mapped = when {
+            edit == null -> offset
+            offset <= edit.start -> offset
+            offset < edit.end -> edit.start + edit.after.length
+            else -> offset + edit.after.length - (edit.end - edit.start)
+        }
+        return mapped.coerceIn(0, length)
     }
 
     fun apply(original: String, edit: Edit): String =
