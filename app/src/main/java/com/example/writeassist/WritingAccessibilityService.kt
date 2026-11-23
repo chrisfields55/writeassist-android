@@ -44,6 +44,8 @@ class WritingAccessibilityService : AccessibilityService() {
     private var activeEdits: List<SuggestionDiff.Edit> = emptyList()
     private var editIndex = 0
     private var dismissButton: TextView? = null
+    private var nextButton: TextView? = null
+    private var previousButton: TextView? = null
     private var lastText = ""
     private var lastPackage = ""
     private val aiWorker = Executors.newSingleThreadExecutor()
@@ -198,14 +200,22 @@ class WritingAccessibilityService : AccessibilityService() {
         originalPreview?.text = "Original: " + edit.before.ifBlank { "(insert)" }.take(350)
         suggestion?.visibility = if (expanded) View.VISIBLE else View.GONE
         suggestion?.text = "Replace with: " + edit.after.ifBlank { "(remove)" }.take(450) +
-            "\\n" + origin
+            "\n" + origin
         applyButton?.visibility = if (expanded) View.VISIBLE else View.GONE
         dismissButton?.visibility = if (expanded) View.VISIBLE else View.GONE
         checkButton?.visibility = if (expanded) View.VISIBLE else View.GONE
+        nextButton?.visibility = if (expanded && activeEdits.size > 1) View.VISIBLE else View.GONE
+        previousButton?.visibility = if (expanded && activeEdits.size > 1) View.VISIBLE else View.GONE
         title?.setOnClickListener {
             expanded = !expanded
             renderSuggestion(corrected, origin)
         }
+    }
+
+    private fun renderCurrentSuggestion() {
+        val corrected = revision?.takeIf { revisionSource == lastText && revisionPackage == lastPackage }
+            ?: LocalCorrections.correct(lastText).takeIf { it != lastText }
+        if (corrected != null) renderSuggestion(corrected, if (revision != null) suggestionOrigin else "Offline")
     }
 
     private fun applySuggestion() {
@@ -277,6 +287,28 @@ class WritingAccessibilityService : AccessibilityService() {
         }
         box.addView(fix)
         suggestion = fix
+        val previous = TextView(this).apply {
+            text = "‹ Previous suggestion"
+            textSize = 13f
+            setTextColor(secondary)
+            setPadding(0, dp(8), 0, dp(8))
+            visibility = View.GONE
+            setOnClickListener {
+                editIndex = (editIndex - 1 + activeEdits.size) % activeEdits.size
+                renderCurrentSuggestion()
+            }
+        }
+        val next = TextView(this).apply {
+            text = "Next suggestion ›"
+            textSize = 13f
+            setTextColor(secondary)
+            setPadding(0, dp(8), 0, dp(8))
+            visibility = View.GONE
+            setOnClickListener {
+                editIndex = (editIndex + 1) % activeEdits.size
+                renderCurrentSuggestion()
+            }
+        }
         val dismiss = TextView(this).apply {
             text = "Dismiss suggestion"
             textSize = 13f
@@ -298,6 +330,10 @@ class WritingAccessibilityService : AccessibilityService() {
         }
         box.addView(apply)
         box.addView(dismiss)
+        box.addView(previous)
+        box.addView(next)
+        previousButton = previous
+        nextButton = next
         dismissButton = dismiss
         applyButton = apply
         val check = TextView(this).apply {
@@ -349,6 +385,8 @@ class WritingAccessibilityService : AccessibilityService() {
         checkButton = null
         feedback = null
         dismissButton = null
+        nextButton = null
+        previousButton = null
     }
 
     fun applyReplacement(original: String, replacement: String, originalPackage: String): Boolean {
@@ -360,7 +398,17 @@ class WritingAccessibilityService : AccessibilityService() {
             val args = Bundle().apply {
                 putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, replacement)
             }
-            node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+            val oldCursor = node.textSelectionStart.coerceAtLeast(0)
+            val changed = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+            if (changed) {
+                val cursor = oldCursor.coerceAtMost(replacement.length)
+                val selection = Bundle().apply {
+                    putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, cursor)
+                    putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, cursor)
+                }
+                node.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, selection)
+            }
+            changed
         } finally { node.recycle() }
     }
 
