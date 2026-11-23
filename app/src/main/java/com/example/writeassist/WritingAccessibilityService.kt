@@ -44,6 +44,7 @@ class WritingAccessibilityService : AccessibilityService() {
     private var styleOriginal = ""
     private var styleName = ""
     private var styleGeneration = 0
+    private var styleBusy = false
     private var title: TextView? = null
     private var suggestion: TextView? = null
     private var originalPreview: TextView? = null
@@ -191,6 +192,7 @@ class WritingAccessibilityService : AccessibilityService() {
             ?: LocalCorrections.correct(value).takeIf { it != value }
         showBubble()
         if (corrected != null && dismissedKey != pkg + "|" + value + "|" + corrected) {
+            activeEdits = SuggestionDiff.between(value, corrected)
             if (expanded) renderAssistantPanel() else renderSuggestion(corrected, if (revision != null) suggestionOrigin else "Offline")
         } else {
             activeEdits = emptyList()
@@ -306,7 +308,7 @@ class WritingAccessibilityService : AccessibilityService() {
     private fun resizeBubble() {
         val view = bubble ?: return
         val params = bubbleParams ?: return
-        params.width = dp(if (expanded) 326 else 56)
+        params.width = dp(if (expanded) 326 else 64)
         params.height = WindowManager.LayoutParams.WRAP_CONTENT
         try { manager?.updateViewLayout(view, params) } catch (_: Exception) {}
     }
@@ -315,7 +317,7 @@ class WritingAccessibilityService : AccessibilityService() {
         val dark = AppTheme.isDark(this)
         val foreground = if (dark) Color.WHITE else Color.rgb(30, 41, 49)
         val muted = if (dark) Color.LTGRAY else Color.DKGRAY
-        title?.text = if (expanded) "✦  WriteAssist     ×" else "W"
+        title?.text = if (expanded) "✦  WriteAssist     ×" else if (activeEdits.isNotEmpty()) "W • " + activeEdits.size else "W"
         title?.gravity = if (expanded) Gravity.START else Gravity.CENTER
         originalPreview?.visibility = View.GONE
         suggestion?.visibility = View.GONE
@@ -327,6 +329,28 @@ class WritingAccessibilityService : AccessibilityService() {
         val panel = bubble ?: return
         while (panel.childCount > 9) panel.removeViewAt(9)
         if (!expanded) { resizeBubble(); return }
+        if (activeEdits.isNotEmpty()) {
+            val section = TextView(this).apply {
+                text = "Review suggestions (" + activeEdits.size + ")"
+                textSize = 15f
+                setTextColor(foreground)
+                setPadding(0, dp(8), 0, dp(8))
+            }
+            panel.addView(section)
+            for ((index, edit) in activeEdits.take(8).withIndex()) {
+                val item = TextView(this).apply {
+                    text = (index + 1).toString() + ".  " + edit.before.ifBlank { "(insert)" } + "  →  " + edit.after.ifBlank { "(remove)" }
+                    textSize = 13f
+                    setTextColor(foreground)
+                    setPadding(dp(5), dp(8), dp(5), dp(8))
+                    setOnClickListener {
+                        editIndex = index
+                        renderCurrentSuggestion()
+                    }
+                }
+                panel.addView(item)
+            }
+        }
         val styles = listOf(
             "Professional" to "Rewrite clearly and professionally, preserving all facts.",
             "Friendly" to "Rewrite in a warm, approachable tone.",
@@ -354,6 +378,12 @@ class WritingAccessibilityService : AccessibilityService() {
             }
             panel.addView(item)
         }
+        if (styleBusy) panel.addView(TextView(this).apply {
+            text = "Generating rewrite…"
+            textSize = 13f
+            setTextColor(muted)
+            setPadding(0, dp(8), 0, dp(8))
+        })
         val preview = stylePreview
         if (preview != null) {
             panel.addView(TextView(this).apply {
@@ -388,13 +418,16 @@ class WritingAccessibilityService : AccessibilityService() {
         if (source.isBlank()) { feedback?.text = "Type something first."; return }
         val pkg = lastPackage
         val token = ++styleGeneration
+        styleBusy = true
         feedback?.text = "Rewriting as " + name + "…"
+        renderAssistantPanel()
         aiWorker.execute {
             val result = GeminiFallback.review(this, source, instruction)
             handler.post {
                 if (token != styleGeneration || lastText != source || lastPackage != pkg) return@post
+                styleBusy = false
                 if (result.source == "Local") {
-                    feedback?.text = "AI unavailable. Check your Gemini key and connection."
+                    feedback?.text = result.notice.ifBlank { "AI rewrite unavailable. Check your Gemini key and connection." }
                 } else {
                     styleOriginal = source
                     styleName = name
@@ -499,7 +532,7 @@ class WritingAccessibilityService : AccessibilityService() {
             setTextColor(secondary)
         }.also { box.addView(it) }
         val params = WindowManager.LayoutParams(
-            dp(56), WindowManager.LayoutParams.WRAP_CONTENT,
+            dp(64), WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
@@ -507,7 +540,7 @@ class WritingAccessibilityService : AccessibilityService() {
         ).apply {
             gravity = Gravity.TOP or Gravity.START
             x = dp(8)
-            y = (resources.displayMetrics.heightPixels * 0.52f).toInt()
+            y = (resources.displayMetrics.heightPixels * 0.48f).toInt()
         }
         var downX = 0f
         var downY = 0f
