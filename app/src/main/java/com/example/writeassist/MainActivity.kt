@@ -298,7 +298,7 @@ class MainActivity : Activity() {
         val auto = Switch(this).apply {
             text = "Automatically check writing with AI"
             textSize = 14f
-            isChecked = prefs.getBoolean("auto_ai", false)
+            isChecked = prefs.getBoolean("auto_ai", true)
         }
         addSpace(panel, 14)
         panel.addView(auto)
