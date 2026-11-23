@@ -30,6 +30,18 @@ jobs:
           gradle-version: '8.9'
       - name: Build debug APK
         run: gradle --no-daemon :app:assembleDebug
+      - name: Check stable signing configuration
+        env:
+          KEYSTORE_B64: ${{ secrets.WRITEASSIST_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.WRITEASSIST_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.WRITEASSIST_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.WRITEASSIST_KEY_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ] && [ -n "$KEYSTORE_PASSWORD" ] && [ -n "$KEY_ALIAS" ] && [ -n "$KEY_PASSWORD" ]; then
+            echo "Stable release signing secrets are configured."
+          else
+            echo "::warning::Stable signing not configured. Debug APKs may require uninstall; configure four WRITEASSIST_* repository secrets before distributing an updateable build."
+          fi
       - name: Upload installable debug APK
         uses: actions/upload-artifact@v4
         with:
