@@ -9,6 +9,9 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.text.InputType
+import android.view.MotionEvent
+import android.view.inputmethod.InputMethodManager
+import android.content.Context
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
@@ -36,6 +39,11 @@ class WritingAccessibilityService : AccessibilityService() {
     private var eventTextSnapshot: String? = null
     private var eventPackageSnapshot: String? = null
     private var bubble: LinearLayout? = null
+    private var bubbleParams: WindowManager.LayoutParams? = null
+    private var stylePreview: String? = null
+    private var styleOriginal = ""
+    private var styleName = ""
+    private var styleGeneration = 0
     private var title: TextView? = null
     private var suggestion: TextView? = null
     private var originalPreview: TextView? = null
@@ -169,6 +177,8 @@ class WritingAccessibilityService : AccessibilityService() {
             return
         }
         if (value != lastText || pkg != lastPackage) {
+            styleGeneration++
+            stylePreview = null
             generation++
             revision = null
             lastRequestedKey = ""
@@ -179,10 +189,14 @@ class WritingAccessibilityService : AccessibilityService() {
         lastPackage = pkg
         val corrected = revision?.takeIf { revisionSource == value && revisionPackage == pkg }
             ?: LocalCorrections.correct(value).takeIf { it != value }
+        showBubble()
         if (corrected != null && dismissedKey != pkg + "|" + value + "|" + corrected) {
-            showBubble()
             renderSuggestion(corrected, if (revision != null) suggestionOrigin else "Offline")
-        } else hideBubble()
+        } else {
+            activeEdits = emptyList()
+            if (!expanded) title?.text = "W"
+            else renderAssistantPanel()
+        }
         val prefs = getSharedPreferences("settings", MODE_PRIVATE)
         handler.removeCallbacks(autoCheck)
         if (prefs.getBoolean("auto_ai", true) && value.length in 12..1500 && lastRequestedKey != pkg + "|" + value) {
@@ -225,7 +239,7 @@ class WritingAccessibilityService : AccessibilityService() {
                     }
                     feedback?.text = if (result.source == "Local") result.notice else ""
                 } else {
-                    hideBubble()
+                    renderAssistantPanel()
                 }
             }
         }
@@ -239,7 +253,7 @@ class WritingAccessibilityService : AccessibilityService() {
         editIndex = editIndex.coerceIn(0, activeEdits.lastIndex)
         val edit = activeEdits[editIndex]
         title?.text = if (expanded) "✦  Suggestion " + (editIndex + 1) + " of " + activeEdits.size
-            else "✦  " + activeEdits.size + " writing suggestion" + if (activeEdits.size == 1) "" else "s"
+            else "W  •  " + activeEdits.size
         originalPreview?.visibility = if (expanded) View.VISIBLE else View.GONE
         originalPreview?.text = "Original: " + edit.before.ifBlank { "(insert)" }.take(350)
         suggestion?.visibility = if (expanded) View.VISIBLE else View.GONE
@@ -252,7 +266,8 @@ class WritingAccessibilityService : AccessibilityService() {
         previousButton?.visibility = if (expanded && activeEdits.size > 1) View.VISIBLE else View.GONE
         title?.setOnClickListener {
             expanded = !expanded
-            renderSuggestion(corrected, origin)
+            resizeBubble()
+            if (expanded) renderAssistantPanel() else renderSuggestion(corrected, origin)
         }
     }
 
@@ -292,6 +307,108 @@ class WritingAccessibilityService : AccessibilityService() {
         hideBubble()
     }
 
+    private fun resizeBubble() {
+        val view = bubble ?: return
+        val params = bubbleParams ?: return
+        params.width = dp(if (expanded) 326 else 56)
+        params.height = WindowManager.LayoutParams.WRAP_CONTENT
+        try { manager?.updateViewLayout(view, params) } catch (_: Exception) {}
+    }
+
+    private fun renderAssistantPanel() {
+        val dark = AppTheme.isDark(this)
+        val foreground = if (dark) Color.WHITE else Color.rgb(30, 41, 49)
+        val muted = if (dark) Color.LTGRAY else Color.DKGRAY
+        title?.text = if (expanded) "✦  WriteAssist     ×" else "W"
+        title?.gravity = if (expanded) Gravity.START else Gravity.CENTER
+        originalPreview?.visibility = View.GONE
+        suggestion?.visibility = View.GONE
+        applyButton?.visibility = View.GONE
+        dismissButton?.visibility = View.GONE
+        previousButton?.visibility = View.GONE
+        nextButton?.visibility = View.GONE
+        checkButton?.visibility = if (expanded) View.VISIBLE else View.GONE
+        val panel = bubble ?: return
+        while (panel.childCount > 8) panel.removeViewAt(8)
+        if (!expanded) { resizeBubble(); return }
+        val styles = listOf(
+            "Professional" to "Rewrite clearly and professionally, preserving all facts.",
+            "Friendly" to "Rewrite in a warm, approachable tone.",
+            "Informal" to "Rewrite in relaxed, conversational language.",
+            "Formal" to "Rewrite with formal and respectful language.",
+            "Concise" to "Make this shorter while preserving the important meaning.",
+            "Confident" to "Make this direct and confident without exaggeration.",
+            "Emojify" to "Add suitable emojis naturally while keeping the original meaning.",
+            "Improve" to "Improve grammar, clarity, and flow without changing the meaning."
+        )
+        val header = TextView(this).apply {
+            text = "Rewrite your text"
+            textSize = 15f
+            setTextColor(foreground)
+            setPadding(0, dp(14), 0, dp(8))
+        }
+        panel.addView(header)
+        for ((name, instruction) in styles) {
+            val item = TextView(this).apply {
+                text = name + "   ›"
+                textSize = 14f
+                setTextColor(foreground)
+                setPadding(dp(8), dp(10), dp(8), dp(10))
+                setOnClickListener { requestStyle(name, instruction) }
+            }
+            panel.addView(item)
+        }
+        val preview = stylePreview
+        if (preview != null) {
+            panel.addView(TextView(this).apply {
+                text = styleName + " preview:\\n" + preview
+                textSize = 14f
+                setTextColor(foreground)
+                setPadding(0, dp(12), 0, dp(12))
+                maxLines = 10
+            })
+            panel.addView(TextView(this).apply {
+                text = "✓  Apply rewrite"
+                gravity = Gravity.CENTER
+                textSize = 14f
+                setTextColor(Color.WHITE)
+                background = rounded(Color.rgb(21, 148, 96))
+                setPadding(dp(8), dp(12), dp(8), dp(12))
+                setOnClickListener {
+                    if (applyReplacement(styleOriginal, preview, lastPackage)) {
+                        stylePreview = null
+                        expanded = false
+                        handler.postDelayed(refresh, 300)
+                    } else feedback?.text = "This editor does not support direct replacement."
+                }
+            })
+        }
+        feedback?.setTextColor(muted)
+        resizeBubble()
+    }
+
+    private fun requestStyle(name: String, instruction: String) {
+        val source = lastText
+        if (source.isBlank()) { feedback?.text = "Type something first."; return }
+        val pkg = lastPackage
+        val token = ++styleGeneration
+        feedback?.text = "Rewriting as " + name + "…"
+        aiWorker.execute {
+            val result = GeminiFallback.review(this, source, instruction)
+            handler.post {
+                if (token != styleGeneration || lastText != source || lastPackage != pkg) return@post
+                if (result.source == "Local") {
+                    feedback?.text = "AI unavailable. Check your Gemini key and connection."
+                } else {
+                    styleOriginal = source
+                    styleName = name
+                    stylePreview = result.text
+                    renderAssistantPanel()
+                }
+            }
+        }
+    }
+
     private fun showBubble() {
         val dark = AppTheme.isDark(this)
         val theme = if (dark) "dark" else "light"
@@ -300,127 +417,137 @@ class WritingAccessibilityService : AccessibilityService() {
         overlayTheme = theme
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = rounded(if (dark) Color.rgb(25, 34, 35) else Color.WHITE)
+            background = rounded(if (dark) Color.rgb(30, 38, 39) else Color.WHITE)
             elevation = dp(8).toFloat()
-            setPadding(dp(14), dp(11), dp(14), dp(11))
+            setPadding(dp(10), dp(9), dp(10), dp(9))
         }
         val heading = TextView(this).apply {
-            text = "✦  WriteAssist"
-            textSize = 15f
+            text = "W"
+            textSize = 18f
+            gravity = Gravity.CENTER
             setTextColor(Color.rgb(21, 148, 96))
             setTypeface(null, android.graphics.Typeface.BOLD)
+            setOnClickListener {
+                expanded = !expanded
+                if (expanded) renderAssistantPanel() else {
+                    renderAssistantPanel()
+                    renderCurrentSuggestion()
+                }
+                resizeBubble()
+            }
         }
         box.addView(heading)
         title = heading
-        val foreground = if (dark) Color.rgb(230, 242, 237) else Color.rgb(31, 41, 55)
-        val secondary = if (dark) Color.rgb(168, 184, 178) else Color.rgb(100, 116, 139)
-        val before = TextView(this).apply {
+        val foreground = if (dark) Color.WHITE else Color.rgb(31, 41, 55)
+        val secondary = if (dark) Color.LTGRAY else Color.DKGRAY
+        originalPreview = TextView(this).apply {
             textSize = 12f
             setTextColor(secondary)
-            setPadding(0, dp(9), 0, dp(5))
             visibility = View.GONE
-        }
-        box.addView(before)
-        originalPreview = before
-        val fix = TextView(this).apply {
+        }.also { box.addView(it) }
+        suggestion = TextView(this).apply {
             textSize = 14f
             setTextColor(foreground)
-            setPadding(0, dp(5), 0, dp(9))
             visibility = View.GONE
-            maxLines = 12
-        }
-        box.addView(fix)
-        suggestion = fix
-        val previous = TextView(this).apply {
-            text = "‹ Previous suggestion"
-            textSize = 13f
-            setTextColor(secondary)
-            setPadding(0, dp(8), 0, dp(8))
+        }.also { box.addView(it) }
+        applyButton = TextView(this).apply {
+            text = "✓  Apply correction"
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            background = rounded(Color.rgb(21, 148, 96))
+            gravity = Gravity.CENTER
+            setPadding(dp(8), dp(10), dp(8), dp(10))
             visibility = View.GONE
-            setOnClickListener {
-                editIndex = (editIndex - 1 + activeEdits.size) % activeEdits.size
-                renderCurrentSuggestion()
-            }
-        }
-        val next = TextView(this).apply {
-            text = "Next suggestion ›"
-            textSize = 13f
-            setTextColor(secondary)
-            setPadding(0, dp(8), 0, dp(8))
-            visibility = View.GONE
-            setOnClickListener {
-                editIndex = (editIndex + 1) % activeEdits.size
-                renderCurrentSuggestion()
-            }
-        }
-        val dismiss = TextView(this).apply {
+            setOnClickListener { applySuggestion() }
+        }.also { box.addView(it) }
+        dismissButton = TextView(this).apply {
             text = "Dismiss suggestion"
             textSize = 13f
             setTextColor(secondary)
-            setPadding(0, dp(12), 0, dp(4))
             visibility = View.GONE
+            setPadding(0, dp(8), 0, dp(8))
             setOnClickListener { dismissSuggestion() }
-        }
-        val apply = TextView(this).apply {
-            text = "✓  Apply correction"
-            textSize = 14f
-            setTypeface(null, android.graphics.Typeface.BOLD)
-            setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER
-            background = rounded(Color.rgb(21, 148, 96))
-            setPadding(dp(10), dp(12), dp(10), dp(12))
+        }.also { box.addView(it) }
+        previousButton = TextView(this).apply {
+            text = "‹ Previous"
+            setTextColor(secondary)
             visibility = View.GONE
-            setOnClickListener { applySuggestion() }
-        }
-        box.addView(apply)
-        box.addView(dismiss)
-        box.addView(previous)
-        box.addView(next)
-        previousButton = previous
-        nextButton = next
-        dismissButton = dismiss
-        applyButton = apply
-        val check = TextView(this).apply {
-            text = "Check with AI  ›"
+            setOnClickListener {
+                if (activeEdits.isNotEmpty()) {
+                    editIndex = (editIndex - 1 + activeEdits.size) % activeEdits.size
+                    renderCurrentSuggestion()
+                }
+            }
+        }.also { box.addView(it) }
+        nextButton = TextView(this).apply {
+            text = "Next ›"
+            setTextColor(secondary)
+            visibility = View.GONE
+            setOnClickListener {
+                if (activeEdits.isNotEmpty()) {
+                    editIndex = (editIndex + 1) % activeEdits.size
+                    renderCurrentSuggestion()
+                }
+            }
+        }.also { box.addView(it) }
+        checkButton = TextView(this).apply {
+            text = "Check grammar with AI"
             textSize = 13f
             setTextColor(Color.rgb(21, 148, 96))
-            setPadding(0, dp(12), 0, dp(6))
-            setOnClickListener { requestAiReview(force = true) }
-        }
-        box.addView(check)
-        checkButton = check
-        check.visibility = View.GONE
-        val note = TextView(this).apply {
+            setPadding(0, dp(10), 0, dp(8))
+            visibility = View.GONE
+            setOnClickListener { requestAiReview(true) }
+        }.also { box.addView(it) }
+        feedback = TextView(this).apply {
             textSize = 12f
             setTextColor(secondary)
-            setPadding(0, dp(5), 0, 0)
-        }
-        box.addView(note)
-        feedback = note
+        }.also { box.addView(it) }
         val params = WindowManager.LayoutParams(
-            dp(310), WindowManager.LayoutParams.WRAP_CONTENT,
+            dp(56), WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
             PixelFormat.TRANSLUCENT
         ).apply {
-            gravity = Gravity.TOP or Gravity.END
-            x = dp(12)
-            y = dp(115)
+            gravity = Gravity.TOP or Gravity.START
+            x = dp(8)
+            y = (resources.displayMetrics.heightPixels * 0.52f).toInt()
+        }
+        var downX = 0f
+        var downY = 0f
+        var startX = 0
+        var startY = 0
+        heading.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    downX = event.rawX; downY = event.rawY
+                    startX = params.x; startY = params.y
+                    false
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (!expanded && (kotlin.math.abs(event.rawX - downX) > dp(8) ||
+                        kotlin.math.abs(event.rawY - downY) > dp(8))) {
+                        params.x = (startX + event.rawX - downX).toInt().coerceAtLeast(0)
+                        params.y = (startY + event.rawY - downY).toInt().coerceAtLeast(0)
+                        try { manager?.updateViewLayout(box, params) } catch (_: Exception) {}
+                        true
+                    } else false
+                }
+                else -> false
+            }
         }
         try {
             manager?.addView(box, params)
             bubble = box
-        } catch (_: Exception) {
-            bubble = null
-            title = null
-            suggestion = null
-        }
+            bubbleParams = params
+            if (expanded) renderAssistantPanel()
+        } catch (_: Exception) { bubble = null; bubbleParams = null }
     }
 
     private fun hideBubble() {
         bubble?.let { try { manager?.removeView(it) } catch (_: Exception) {} }
         bubble = null
+        bubbleParams = null
         overlayTheme = ""
         title = null
         suggestion = null
