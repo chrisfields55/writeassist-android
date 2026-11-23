@@ -16,8 +16,8 @@ object GeminiFallback {
         val key = ApiCredentials.load(context)
         if (key.isNullOrBlank()) return Result(local, "Local", "Add a Gemini API key in Settings for AI corrections.")
         val configured = prefs.getString("model", "gemini-2.5-flash").orEmpty()
-        val primary = configured.takeIf { it.startsWith("gemini-") } ?: "gemini-3.8-flash"
-        val candidates = listOf(primary, "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash")
+        val primary = configured.takeIf { it.startsWith("gemini-") } ?: "gemini-2.5-flash"
+        val candidates = listOf("gemini-2.5-flash", primary, "gemini-2.5-flash-lite", "gemini-2.0-flash")
             .distinct()
         var lastStatus = 0
         var lastError = ""
@@ -49,8 +49,8 @@ object GeminiFallback {
                         if (corrected.isNotBlank()) return Result(corrected, "Gemini ($model)", "")
                     }
                     // Do not retry invalid keys, quotas, or blocked requests.
-                    if (lastStatus == 400 || lastStatus == 401 || lastStatus == 403 || lastStatus == 429) break
-                    if (lastStatus !in listOf(404, 500, 502, 503, 504)) break
+                    if (lastStatus == 401 || lastStatus == 403 || lastStatus == 429) break
+                    if (lastStatus !in listOf(400, 404, 500, 502, 503, 504)) break
                 } finally { conn.disconnect() }
             } catch (e: Exception) {
                 lastError = e.message.orEmpty().take(180)
