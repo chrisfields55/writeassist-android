@@ -191,7 +191,7 @@ class WritingAccessibilityService : AccessibilityService() {
             ?: LocalCorrections.correct(value).takeIf { it != value }
         showBubble()
         if (corrected != null && dismissedKey != pkg + "|" + value + "|" + corrected) {
-            renderSuggestion(corrected, if (revision != null) suggestionOrigin else "Offline")
+            if (expanded) renderAssistantPanel() else renderSuggestion(corrected, if (revision != null) suggestionOrigin else "Offline")
         } else {
             activeEdits = emptyList()
             if (!expanded) title?.text = "W"
@@ -264,11 +264,7 @@ class WritingAccessibilityService : AccessibilityService() {
         checkButton?.visibility = if (expanded) View.VISIBLE else View.GONE
         nextButton?.visibility = if (expanded && activeEdits.size > 1) View.VISIBLE else View.GONE
         previousButton?.visibility = if (expanded && activeEdits.size > 1) View.VISIBLE else View.GONE
-        title?.setOnClickListener {
-            expanded = !expanded
-            resizeBubble()
-            if (expanded) renderAssistantPanel() else renderSuggestion(corrected, origin)
-        }
+
     }
 
     private fun renderCurrentSuggestion() {
@@ -329,7 +325,7 @@ class WritingAccessibilityService : AccessibilityService() {
         nextButton?.visibility = View.GONE
         checkButton?.visibility = if (expanded) View.VISIBLE else View.GONE
         val panel = bubble ?: return
-        while (panel.childCount > 8) panel.removeViewAt(8)
+        while (panel.childCount > 9) panel.removeViewAt(9)
         if (!expanded) { resizeBubble(); return }
         val styles = listOf(
             "Professional" to "Rewrite clearly and professionally, preserving all facts.",
