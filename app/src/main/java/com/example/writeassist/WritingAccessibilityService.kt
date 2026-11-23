@@ -32,6 +32,9 @@ class WritingAccessibilityService : AccessibilityService() {
     private val handler = Handler(Looper.getMainLooper())
     private var manager: WindowManager? = null
     private var lastEditableEventNode: AccessibilityNodeInfo? = null
+    private var lastTypingEventAt = 0L
+    private var eventTextSnapshot: String? = null
+    private var eventPackageSnapshot: String? = null
     private var bubble: LinearLayout? = null
     private var title: TextView? = null
     private var suggestion: TextView? = null
@@ -73,24 +76,41 @@ class WritingAccessibilityService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
-        if (event.packageName?.toString() == packageName) return
-        if (event.packageName?.toString() == "com.android.systemui") return
-        if (event.eventType == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED ||
-            event.eventType == AccessibilityEvent.TYPE_VIEW_FOCUSED ||
-            event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
-            event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
-            if (event.eventType == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED ||
-                event.eventType == AccessibilityEvent.TYPE_VIEW_FOCUSED) {
-                val source = event.source
+        val pkg = event.packageName?.toString() ?: return
+        if (pkg == packageName || pkg == "com.android.systemui") return
+        val typing = event.eventType == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED
+        val focus = event.eventType == AccessibilityEvent.TYPE_VIEW_FOCUSED
+        if (typing || focus) {
+            val source = event.source
+            try {
                 if (source?.isEditable == true && !isSensitive(source)) {
                     lastEditableEventNode?.recycle()
                     lastEditableEventNode = AccessibilityNodeInfo.obtain(source)
+                    if (typing) {
+                        eventTextSnapshot = source.text?.toString()
+                            ?: event.text.joinToString("")
+                        eventPackageSnapshot = pkg
+                    }
+                } else if (typing && event.text.isNotEmpty()) {
+                    eventTextSnapshot = event.text.joinToString("")
+                    eventPackageSnapshot = pkg
                 }
-                source?.recycle()
-            }
+            } finally { source?.recycle() }
+        }
+        if (typing) {
+            lastTypingEventAt = android.os.SystemClock.uptimeMillis()
             handler.removeCallbacks(refresh)
-            handler.removeCallbacks(autoCheck)
-            handler.postDelayed(refresh, if (event.eventType == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED) 250 else 450)
+            handler.postDelayed(refresh, 280)
+        } else if (focus) {
+            handler.removeCallbacks(refresh)
+            handler.postDelayed(refresh, 350)
+        } else if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+            event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
+            // Frequent content-change events must not indefinitely postpone text checks.
+            if (android.os.SystemClock.uptimeMillis() - lastTypingEventAt > 900L) {
+                handler.removeCallbacks(refresh)
+                handler.postDelayed(refresh, 500)
+            }
         }
     }
 
@@ -122,6 +142,11 @@ class WritingAccessibilityService : AccessibilityService() {
 
     private fun updateFromFocus() {
         val node = editableNode()
+        if (node == null && !eventTextSnapshot.isNullOrBlank() &&
+            android.os.SystemClock.uptimeMillis() - lastTypingEventAt < 2500L) {
+            processText(eventPackageSnapshot.orEmpty(), eventTextSnapshot.orEmpty())
+            return
+        }
         if (node == null) {
             if (lostFocusSince == 0L) lostFocusSince = android.os.SystemClock.uptimeMillis()
             if (android.os.SystemClock.uptimeMillis() - lostFocusSince > 1200L) hideBubble()
@@ -133,7 +158,12 @@ class WritingAccessibilityService : AccessibilityService() {
         val value = node.text?.toString() ?: ""
         val sensitive = isSensitive(node)
         node.recycle()
-        if (pkg.isBlank() || pkg == packageName || sensitive ||
+        if (sensitive) { hideBubble(); return }
+        processText(pkg, value)
+    }
+
+    private fun processText(pkg: String, value: String) {
+        if (pkg.isBlank() || pkg == packageName ||
             value.isBlank() || value.length > 2500) {
             hideBubble()
             return
@@ -431,6 +461,7 @@ class WritingAccessibilityService : AccessibilityService() {
         handler.removeCallbacksAndMessages(null)
         lastEditableEventNode?.recycle()
         lastEditableEventNode = null
+        eventTextSnapshot = null
         aiWorker.shutdownNow()
         hideBubble()
         instance = null
