@@ -41,6 +41,9 @@ class WritingAccessibilityService : AccessibilityService() {
     private var revisionSource = ""
     private var revisionPackage = ""
     private var generation = 0
+    private var lastRequestedKey = ""
+    private var lostFocusSince = 0L
+    private var overlayTheme = ""
     private val autoCheck = Runnable { requestAiReview() }
     private val refresh = Runnable { updateFromFocus() }
 
@@ -57,10 +60,8 @@ class WritingAccessibilityService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
-        if (event.packageName?.toString() == packageName) {
-            hideBubble()
-            return
-        }
+        if (event.packageName?.toString() == packageName) return
+        if (event.packageName?.toString() == "com.android.systemui") return
         if (event.eventType == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED ||
             event.eventType == AccessibilityEvent.TYPE_VIEW_FOCUSED ||
             event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
@@ -95,7 +96,13 @@ class WritingAccessibilityService : AccessibilityService() {
 
     private fun updateFromFocus() {
         val node = editableNode()
-        if (node == null) { hideBubble(); return }
+        if (node == null) {
+            if (lostFocusSince == 0L) lostFocusSince = android.os.SystemClock.uptimeMillis()
+            if (android.os.SystemClock.uptimeMillis() - lostFocusSince > 1200L) hideBubble()
+            else handler.postDelayed(refresh, 550)
+            return
+        }
+        lostFocusSince = 0L
         val pkg = node.packageName?.toString() ?: ""
         val value = node.text?.toString() ?: ""
         val sensitive = isSensitive(node)
@@ -108,6 +115,7 @@ class WritingAccessibilityService : AccessibilityService() {
         if (value != lastText || pkg != lastPackage) {
             generation++
             revision = null
+            lastRequestedKey = ""
         }
         lastText = value
         lastPackage = pkg
@@ -121,7 +129,7 @@ class WritingAccessibilityService : AccessibilityService() {
         }
         val prefs = getSharedPreferences("settings", MODE_PRIVATE)
         handler.removeCallbacks(autoCheck)
-        if (prefs.getBoolean("auto_ai", false) && value.length in 12..1500) {
+        if (prefs.getBoolean("auto_ai", false) && value.length in 12..1500 && lastRequestedKey != pkg + "|" + value) {
             handler.postDelayed(autoCheck, 1800)
         }
     }
@@ -133,6 +141,9 @@ class WritingAccessibilityService : AccessibilityService() {
         val pkg = lastPackage
         val requestGeneration = generation
         if (source.length !in 12..1500 || pkg.isBlank()) return
+        val requestKey = pkg + "|" + source
+        if (lastRequestedKey == requestKey) return
+        lastRequestedKey = requestKey
         aiWorker.execute {
             val result = GeminiFallback.review(this, source,
                 "Correct spelling, grammar, punctuation, sentence structure, and natural flow.")
@@ -181,10 +192,14 @@ class WritingAccessibilityService : AccessibilityService() {
     }
 
     private fun showBubble() {
+        val dark = AppTheme.isDark(this)
+        val theme = if (dark) "dark" else "light"
+        if (bubble != null && overlayTheme != theme) hideBubble()
         if (bubble != null) return
+        overlayTheme = theme
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = rounded(Color.rgb(255, 255, 255))
+            background = rounded(if (dark) Color.rgb(25, 34, 35) else Color.WHITE)
             elevation = dp(8).toFloat()
             setPadding(dp(14), dp(11), dp(14), dp(11))
         }
@@ -198,7 +213,7 @@ class WritingAccessibilityService : AccessibilityService() {
         title = heading
         val fix = TextView(this).apply {
             textSize = 13f
-            setTextColor(Color.rgb(31, 41, 55))
+            setTextColor(if (dark) Color.rgb(230, 242, 237) else Color.rgb(31, 41, 55))
             setPadding(0, dp(8), 0, dp(8))
             visibility = View.GONE
             setOnClickListener {
@@ -266,6 +281,7 @@ class WritingAccessibilityService : AccessibilityService() {
     private fun hideBubble() {
         bubble?.let { try { manager?.removeView(it) } catch (_: Exception) {} }
         bubble = null
+        overlayTheme = ""
         title = null
         suggestion = null
     }
