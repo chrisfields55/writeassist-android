@@ -132,14 +132,14 @@ class WritingAccessibilityService : AccessibilityService() {
         } else hideBubble()
         val prefs = getSharedPreferences("settings", MODE_PRIVATE)
         handler.removeCallbacks(autoCheck)
-        if (prefs.getBoolean("auto_ai", false) && value.length in 12..1500 && lastRequestedKey != pkg + "|" + value) {
+        if (prefs.getBoolean("auto_ai", true) && value.length in 12..1500 && lastRequestedKey != pkg + "|" + value) {
             handler.postDelayed(autoCheck, 1800)
         }
     }
 
     private fun requestAiReview(force: Boolean = false) {
         val prefs = getSharedPreferences("settings", MODE_PRIVATE)
-        if (!force && !prefs.getBoolean("auto_ai", false)) return
+        if (!force && !prefs.getBoolean("auto_ai", true)) return
         val source = lastText
         val pkg = lastPackage
         val requestGeneration = generation
@@ -154,7 +154,7 @@ class WritingAccessibilityService : AccessibilityService() {
                 "Correct spelling, grammar, punctuation, sentence structure, and natural flow.")
             handler.post {
                 if (generation != requestGeneration || lastText != source ||
-                    lastPackage != pkg || (!force && !prefs.getBoolean("auto_ai", false))) return@post
+                    lastPackage != pkg || (!force && !prefs.getBoolean("auto_ai", true))) return@post
                 val node = editableNode() ?: return@post
                 val stillSafe = !isSensitive(node) && node.isEditable &&
                     node.text?.toString() == source && node.packageName?.toString() == pkg
