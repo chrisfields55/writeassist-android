@@ -258,7 +258,7 @@ class MainActivity : Activity() {
             setText(prefs.getString("endpoint", "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"))
         }
         model = EditText(this).apply {
-            setText(prefs.getString("model", "gemini-3.8-flash"))
+            setText(prefs.getString("model", "gemini-2.5-flash"))
         }
         apiKey = EditText(this).apply {
             setText(ApiCredentials.load(this@MainActivity) ?: "")
