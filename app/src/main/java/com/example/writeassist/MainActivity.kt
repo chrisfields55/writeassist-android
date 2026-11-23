@@ -161,13 +161,22 @@ class MainActivity : Activity() {
                     return@setOnClickListener
                 }
                 val service = WritingAccessibilityService.instance
-                val success = service?.applyReplacement(original, output.text.toString(), pkg) == true
-                if (success) {
-                    status.text = "Correction applied."
-                    sourceFromAccessibility = null
-                } else {
-                    status.text = "Cannot replace text in this app. Copy the result instead. Some apps block accessibility edits."
+                val replacement = output.text.toString()
+                if (service == null) {
+                    status.text = "Enable the WriteAssist Accessibility Service first."
+                    return@setOnClickListener
                 }
+                status.text = "Returning to the original app to apply correction…"
+                moveTaskToBack(true)
+                main.postDelayed({
+                    val success = service.applyReplacement(original, replacement, pkg)
+                    if (success) {
+                        status.text = "Correction applied."
+                        sourceFromAccessibility = null
+                    } else {
+                        status.text = "Could not apply automatically. Return here and copy the result instead."
+                    }
+                }, 900)
             }
         })
         layout.addView(Button(this).apply {
