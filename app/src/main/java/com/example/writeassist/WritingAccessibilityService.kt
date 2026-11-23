@@ -63,12 +63,20 @@ class WritingAccessibilityService : AccessibilityService() {
             (node.inputType and InputType.TYPE_NUMBER_VARIATION_PASSWORD) != 0
         node.recycle()
         if (pkg == packageName || isPassword || cls.contains("Password", true) ||
-            text.isBlank() || text.length > 2500 || pkg.isBlank()) {
+            text.isBlank() || text.length > 2500 || pkg.isBlank() || !hasLikelyIssue(text)) {
             hideBubble(); return
         }
         lastText = text
         lastPackage = pkg
         showBubble()
+    }
+    private fun hasLikelyIssue(text: String): Boolean {
+        // Fast, offline checks. These are only hints; AI reviews text after explicit consent.
+        if ("  " in text) return true
+        if (Regex("\\b(teh|adn|recieve|definately|seperate|occured|grammer)\\b", RegexOption.IGNORE_CASE).containsMatchIn(text)) return true
+        if (Regex("\\b([A-Za-z]{2,})\\s+\\1\\b", RegexOption.IGNORE_CASE).containsMatchIn(text)) return true
+        if (Regex("\\bi\\b").containsMatchIn(text)) return true
+        return false
     }
     private fun showBubble() {
         if (bubble != null) return
