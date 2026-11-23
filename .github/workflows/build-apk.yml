@@ -42,6 +42,27 @@ jobs:
           else
             echo "::warning::Stable signing not configured. Debug APKs may require uninstall; configure four WRITEASSIST_* repository secrets before distributing an updateable build."
           fi
+      - name: Build stable signed release APK when signing secrets exist
+        env:
+          KEYSTORE_B64: ${{ secrets.WRITEASSIST_KEYSTORE_BASE64 }}
+          WRITEASSIST_KEYSTORE_PASSWORD: ${{ secrets.WRITEASSIST_KEYSTORE_PASSWORD }}
+          WRITEASSIST_KEY_ALIAS: ${{ secrets.WRITEASSIST_KEY_ALIAS }}
+          WRITEASSIST_KEY_PASSWORD: ${{ secrets.WRITEASSIST_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          if [ -n "$KEYSTORE_B64" ] && [ -n "$WRITEASSIST_KEYSTORE_PASSWORD" ] && [ -n "$WRITEASSIST_KEY_ALIAS" ] && [ -n "$WRITEASSIST_KEY_PASSWORD" ]; then
+            echo "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/writeassist-release.jks"
+            export WRITEASSIST_KEYSTORE_PATH="$RUNNER_TEMP/writeassist-release.jks"
+            gradle --no-daemon :app:assembleRelease
+          else
+            echo "Release APK skipped until stable signing secrets are configured."
+          fi
+      - name: Upload stable signed release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: writeassist-stable-release-apk
+          path: app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: ignore
       - name: Upload installable debug APK
         uses: actions/upload-artifact@v4
         with:
