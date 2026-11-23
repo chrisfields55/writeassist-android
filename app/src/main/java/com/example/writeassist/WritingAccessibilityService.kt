@@ -56,6 +56,8 @@ class WritingAccessibilityService : AccessibilityService() {
     private var feedback: TextView? = null
     private var suggestionOrigin = ""
     private var dismissedKey = ""
+    private val ignoredSuggestions = mutableSetOf<String>()
+    private var reviewTab = true
     private var expanded = false
     private var activeEdits: List<SuggestionDiff.Edit> = emptyList()
     private var editIndex = 0
@@ -186,6 +188,7 @@ class WritingAccessibilityService : AccessibilityService() {
             revision = null
             lastRequestedKey = ""
             dismissedKey = ""
+            ignoredSuggestions.clear()
             expanded = false
             activeEdits = emptyList()
         }
@@ -321,11 +324,13 @@ class WritingAccessibilityService : AccessibilityService() {
         try { manager?.updateViewLayout(view, params) } catch (_: Exception) {}
     }
 
+    private fun suggestionId(edit: SuggestionDiff.Edit) = "${edit.start}:${edit.end}:${edit.before}:${edit.after}"
+
     private fun renderAssistantPanel() {
         val dark = AppTheme.isDark(this)
         val foreground = if (dark) Color.WHITE else Color.rgb(30, 41, 49)
         val muted = if (dark) Color.LTGRAY else Color.DKGRAY
-        title?.text = if (expanded) "✦  WriteAssist     ×" else if (activeEdits.isNotEmpty()) "W • " + activeEdits.size else "W"
+        title?.text = if (expanded) "✦  WriteAssist  ×" else activeEdits.count { suggestionId(it) !in ignoredSuggestions }.takeIf { it > 0 }?.toString() ?: "W"
         title?.gravity = if (expanded) Gravity.START else Gravity.CENTER
         originalPreview?.visibility = View.GONE
         suggestion?.visibility = View.GONE
@@ -337,28 +342,93 @@ class WritingAccessibilityService : AccessibilityService() {
         val panel = panelContent ?: return
         panel.removeAllViews()
         panelScroll?.visibility = if (expanded) View.VISIBLE else View.GONE
+        checkButton?.text = "Check full text with AI  ›"
         if (!expanded) { resizeBubble(); return }
-        if (activeEdits.isNotEmpty()) {
-            val section = TextView(this).apply {
-                text = "Review suggestions (" + activeEdits.size + ")"
-                textSize = 15f
-                setTextColor(foreground)
-                setPadding(0, dp(8), 0, dp(8))
+        val tabs = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        fun tab(label: String, selected: Boolean, action: () -> Unit) = TextView(this).apply {
+            text = label
+            textSize = 14f
+            gravity = Gravity.CENTER
+            setTextColor(if (selected) Color.rgb(18, 155, 103) else muted)
+            setTypeface(null, if (selected) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
+            setPadding(dp(10), dp(12), dp(10), dp(12))
+            setOnClickListener { action() }
+        }
+        tabs.addView(tab("Suggestions (" + activeEdits.count { suggestionId(it) !in ignoredSuggestions } + ")", reviewTab) {
+            reviewTab = true; renderAssistantPanel()
+        }, LinearLayout.LayoutParams(0, dp(48), 1f))
+        tabs.addView(tab("Rewrite", !reviewTab) {
+            reviewTab = false; renderAssistantPanel()
+        }, LinearLayout.LayoutParams(0, dp(48), 1f))
+        panel.addView(tabs)
+        if (reviewTab) {
+            val visible = activeEdits.filter { suggestionId(it) !in ignoredSuggestions }
+            if (visible.isEmpty()) {
+                panel.addView(TextView(this).apply {
+                    text = "No suggestions yet. Keep typing or check with AI."
+                    textSize = 14f
+                    setTextColor(muted)
+                    setPadding(dp(8), dp(18), dp(8), dp(18))
+                })
             }
-            panel.addView(section)
-            for ((index, edit) in activeEdits.take(8).withIndex()) {
-                val item = TextView(this).apply {
-                    text = (index + 1).toString() + ".  " + edit.before.ifBlank { "(insert)" } + "  →  " + edit.after.ifBlank { "(remove)" }
-                    textSize = 13f
-                    setTextColor(foreground)
-                    setPadding(dp(5), dp(8), dp(5), dp(8))
-                    setOnClickListener {
-                        editIndex = index
-                        renderCurrentSuggestion()
-                    }
+            for (edit in visible.take(20)) {
+                val card = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(dp(12), dp(12), dp(12), dp(12))
+                    background = rounded(if (dark) Color.rgb(43, 53, 54) else Color.rgb(245, 247, 246))
                 }
-                panel.addView(item)
+                val category = when {
+                    edit.before.isBlank() -> "Correctness · Add text"
+                    edit.after.isBlank() -> "Correctness · Remove text"
+                    edit.before.trim().equals(edit.after.trim(), ignoreCase = true) -> "Correctness · Formatting"
+                    else -> "Writing suggestion"
+                }
+                card.addView(TextView(this).apply {
+                    text = category
+                    textSize = 12f
+                    setTextColor(Color.rgb(28, 172, 114))
+                })
+                card.addView(TextView(this).apply {
+                    text = edit.before.ifBlank { "(insert)" } + "  →  " + edit.after.ifBlank { "(remove)" }
+                    textSize = 15f
+                    setTextColor(foreground)
+                    setPadding(0, dp(10), 0, dp(10))
+                })
+                val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                actions.addView(TextView(this).apply {
+                    text = "Dismiss"
+                    textSize = 13f
+                    setTextColor(muted)
+                    gravity = Gravity.CENTER
+                    setPadding(dp(10), dp(10), dp(10), dp(10))
+                    setOnClickListener {
+                        ignoredSuggestions.add(suggestionId(edit))
+                        renderAssistantPanel()
+                    }
+                }, LinearLayout.LayoutParams(0, dp(44), 1f))
+                actions.addView(TextView(this).apply {
+                    text = "✓  Accept"
+                    textSize = 14f
+                    gravity = Gravity.CENTER
+                    setTextColor(Color.WHITE)
+                    background = rounded(Color.rgb(21, 148, 96))
+                    setOnClickListener {
+                        val original = lastText
+                        val replacement = SuggestionDiff.apply(original, edit)
+                        if (applyReplacement(original, replacement, lastPackage)) {
+                            revision = null
+                            lastRequestedKey = ""
+                            handler.postDelayed(refresh, 250)
+                        } else feedback?.text = "This text field does not support direct replacement."
+                    }
+                }, LinearLayout.LayoutParams(0, dp(44), 1f))
+                card.addView(actions)
+                panel.addView(card, LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { bottomMargin = dp(8) })
             }
+            resizeBubble()
+            return
         }
         val styles = listOf(
             "Professional" to "Rewrite clearly and professionally, preserving all facts.",
@@ -468,6 +538,7 @@ class WritingAccessibilityService : AccessibilityService() {
             setTypeface(null, android.graphics.Typeface.BOLD)
             setOnClickListener {
                 expanded = !expanded
+                if (expanded) reviewTab = true
                 if (expanded) renderAssistantPanel() else {
                     renderAssistantPanel()
                     renderCurrentSuggestion()
