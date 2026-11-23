@@ -1,6 +1,9 @@
 package com.example.writeassist
 
 import android.app.Activity
+import android.provider.Settings
+import android.content.ComponentName
+import android.text.TextUtils
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -34,12 +37,17 @@ class MainActivity : Activity() {
     private var processText = false
     private var readonly = true
     private var lastResultReady = false
+    private var sourceFromAccessibility: String? = null
+    private var sourcePackage: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         processText = intent?.action == Intent.ACTION_PROCESS_TEXT
         readonly = intent?.getBooleanExtra(Intent.EXTRA_PROCESS_TEXT_READONLY, true) ?: true
-        val incoming = when (intent?.action) {
+        val accessibilityIncoming = intent?.getStringExtra("accessibility_text")
+        sourceFromAccessibility = accessibilityIncoming
+        sourcePackage = WritingAccessibilityService.capturedPackage
+        val incoming = accessibilityIncoming ?: when (intent?.action) {
             Intent.ACTION_PROCESS_TEXT -> intent.getCharSequenceExtra(Intent.EXTRA_PROCESS_TEXT)?.toString()
             Intent.ACTION_SEND -> intent.getStringExtra(Intent.EXTRA_TEXT)
             else -> null
@@ -67,6 +75,16 @@ class MainActivity : Activity() {
             text = "WriteAssist"
             textSize = 28f
             setTextColor(Color.rgb(20, 70, 125))
+        })
+        layout.addView(Button(this).apply {
+            text = "Enable typing suggestions in Android Settings"
+            setOnClickListener {
+                startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            }
+        })
+        layout.addView(TextView(this).apply {
+            text = "Enable WriteAssist under Installed apps in Accessibility settings. A floating Check writing button appears in supported text fields. Text is NOT sent to AI until you press Improve with AI."
+            setPadding(0, 8, 0, 8)
         })
         layout.addView(heading("AI API endpoint (HTTPS, OpenAI-compatible)"))
         endpoint = field(prefs.getString("endpoint", "https://api.openai.com/v1/chat/completions")!!)
@@ -131,6 +149,25 @@ class MainActivity : Activity() {
                 val result = Intent().putExtra(Intent.EXTRA_PROCESS_TEXT, output.text.toString())
                 setResult(RESULT_OK, result)
                 finish()
+            }
+        })
+        if (sourceFromAccessibility != null) layout.addView(Button(this).apply {
+            text = "Apply correction to original app"
+            setOnClickListener {
+                val original = sourceFromAccessibility
+                val pkg = sourcePackage
+                if (!lastResultReady || original == null || pkg == null || output.text.isBlank()) {
+                    status.text = "Generate a suggestion first."
+                    return@setOnClickListener
+                }
+                val service = WritingAccessibilityService.instance
+                val success = service?.applyReplacement(original, output.text.toString(), pkg) == true
+                if (success) {
+                    status.text = "Correction applied."
+                    sourceFromAccessibility = null
+                } else {
+                    status.text = "Cannot replace text in this app. Copy the result instead. Some apps block accessibility edits."
+                }
             }
         })
         layout.addView(Button(this).apply {
