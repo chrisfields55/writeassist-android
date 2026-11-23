@@ -17,6 +17,7 @@ import android.view.View
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.widget.ScrollView
 import android.widget.LinearLayout
 import android.widget.TextView
 import org.json.JSONArray
@@ -40,6 +41,8 @@ class WritingAccessibilityService : AccessibilityService() {
     private var eventPackageSnapshot: String? = null
     private var bubble: LinearLayout? = null
     private var bubbleParams: WindowManager.LayoutParams? = null
+    private var panelScroll: ScrollView? = null
+    private var panelContent: LinearLayout? = null
     private var stylePreview: String? = null
     private var styleOriginal = ""
     private var styleName = ""
@@ -111,6 +114,8 @@ class WritingAccessibilityService : AccessibilityService() {
             handler.removeCallbacks(refresh)
             handler.postDelayed(refresh, 280)
         } else if (focus) {
+            eventTextSnapshot = null
+            eventPackageSnapshot = null
             handler.removeCallbacks(refresh)
             handler.postDelayed(refresh, 350)
         } else if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
@@ -128,7 +133,9 @@ class WritingAccessibilityService : AccessibilityService() {
         val focused = root?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
         if (focused?.isEditable == true && !isSensitive(focused)) return focused
         focused?.recycle()
+        // Never reuse an editor from another screen or app as the active target.
         val cached = lastEditableEventNode ?: return null
+        if (root?.packageName?.toString() != cached.packageName?.toString()) return null
         return try {
             if (!cached.refresh() || !cached.isEditable || isSensitive(cached)) null
             else AccessibilityNodeInfo.obtain(cached)
@@ -151,11 +158,6 @@ class WritingAccessibilityService : AccessibilityService() {
 
     private fun updateFromFocus() {
         val node = editableNode()
-        if (node == null && !eventTextSnapshot.isNullOrBlank() &&
-            android.os.SystemClock.uptimeMillis() - lastTypingEventAt < 2500L) {
-            processText(eventPackageSnapshot.orEmpty(), eventTextSnapshot.orEmpty())
-            return
-        }
         if (node == null) {
             if (lostFocusSince == 0L) lostFocusSince = android.os.SystemClock.uptimeMillis()
             if (android.os.SystemClock.uptimeMillis() - lostFocusSince > 1200L) hideBubble()
@@ -173,7 +175,7 @@ class WritingAccessibilityService : AccessibilityService() {
 
     private fun processText(pkg: String, value: String) {
         if (pkg.isBlank() || pkg == packageName ||
-            value.isBlank() || value.length > 2500) {
+            value.length > 2500) {
             hideBubble()
             return
         }
@@ -185,6 +187,7 @@ class WritingAccessibilityService : AccessibilityService() {
             lastRequestedKey = ""
             dismissedKey = ""
             expanded = false
+            activeEdits = emptyList()
         }
         lastText = value
         lastPackage = pkg
@@ -224,11 +227,11 @@ class WritingAccessibilityService : AccessibilityService() {
             handler.post {
                 if (generation != requestGeneration || lastText != source ||
                     lastPackage != pkg || (!force && !prefs.getBoolean("auto_ai", true))) return@post
-                val node = editableNode() ?: return@post
+                val node = editableNode() ?: run { checkButton?.text = "Check grammar with AI"; return@post }
                 val stillSafe = !isSensitive(node) && node.isEditable &&
                     node.text?.toString() == source && node.packageName?.toString() == pkg
                 node.recycle()
-                if (!stillSafe) return@post
+                if (!stillSafe) { checkButton?.text = "Check grammar with AI"; return@post }
                 checkButton?.text = "Check with AI again  ›"
                 if (result.text != source && result.text.isNotBlank()) {
                     revision = result.text
@@ -237,11 +240,13 @@ class WritingAccessibilityService : AccessibilityService() {
                     suggestionOrigin = result.source
                     if (dismissedKey != pkg + "|" + source + "|" + result.text) {
                         showBubble()
-                        renderSuggestion(result.text, result.source)
+                        activeEdits = SuggestionDiff.between(source, result.text)
+                        renderAssistantPanel()
                     }
                     feedback?.text = if (result.source == "Local") result.notice else ""
                 } else {
                     renderAssistantPanel()
+                    feedback?.text = result.notice
                 }
             }
         }
@@ -249,13 +254,13 @@ class WritingAccessibilityService : AccessibilityService() {
 
     private fun renderSuggestion(corrected: String?, origin: String) {
         val changed = !corrected.isNullOrBlank() && corrected != lastText
-        if (!changed) { hideBubble(); return }
+        if (!changed) { activeEdits = emptyList(); renderAssistantPanel(); return }
         activeEdits = SuggestionDiff.between(lastText, corrected!!)
-        if (activeEdits.isEmpty()) { hideBubble(); return }
+        if (activeEdits.isEmpty()) { renderAssistantPanel(); return }
         editIndex = editIndex.coerceIn(0, activeEdits.lastIndex)
         val edit = activeEdits[editIndex]
         title?.text = if (expanded) "✦  Suggestion " + (editIndex + 1) + " of " + activeEdits.size
-            else "W  •  " + activeEdits.size
+            else activeEdits.size.toString()
         originalPreview?.visibility = if (expanded) View.VISIBLE else View.GONE
         originalPreview?.text = "Original: " + edit.before.ifBlank { "(insert)" }.take(350)
         suggestion?.visibility = if (expanded) View.VISIBLE else View.GONE
@@ -308,7 +313,10 @@ class WritingAccessibilityService : AccessibilityService() {
     private fun resizeBubble() {
         val view = bubble ?: return
         val params = bubbleParams ?: return
-        params.width = dp(if (expanded) 326 else 64)
+        params.width = if (expanded) (resources.displayMetrics.widthPixels - dp(32)).coerceAtMost(dp(430)) else dp(52)
+        params.gravity = if (expanded) Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL else Gravity.TOP or Gravity.START
+        params.x = if (expanded) 0 else dp(8)
+        params.y = if (expanded) dp(12) else (resources.displayMetrics.heightPixels * 0.48f).toInt()
         params.height = WindowManager.LayoutParams.WRAP_CONTENT
         try { manager?.updateViewLayout(view, params) } catch (_: Exception) {}
     }
@@ -326,8 +334,9 @@ class WritingAccessibilityService : AccessibilityService() {
         previousButton?.visibility = View.GONE
         nextButton?.visibility = View.GONE
         checkButton?.visibility = if (expanded) View.VISIBLE else View.GONE
-        val panel = bubble ?: return
-        while (panel.childCount > 9) panel.removeViewAt(9)
+        val panel = panelContent ?: return
+        panel.removeAllViews()
+        panelScroll?.visibility = if (expanded) View.VISIBLE else View.GONE
         if (!expanded) { resizeBubble(); return }
         if (activeEdits.isNotEmpty()) {
             val section = TextView(this).apply {
@@ -427,6 +436,7 @@ class WritingAccessibilityService : AccessibilityService() {
                 if (token != styleGeneration || lastText != source || lastPackage != pkg) return@post
                 styleBusy = false
                 if (result.source == "Local") {
+                    renderAssistantPanel()
                     feedback?.text = result.notice.ifBlank { "AI rewrite unavailable. Check your Gemini key and connection." }
                 } else {
                     styleOriginal = source
@@ -531,8 +541,14 @@ class WritingAccessibilityService : AccessibilityService() {
             textSize = 12f
             setTextColor(secondary)
         }.also { box.addView(it) }
+        panelContent = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        panelScroll = ScrollView(this).apply {
+            visibility = View.GONE
+            isFillViewport = false
+            addView(panelContent)
+        }.also { box.addView(it, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(330))) }
         val params = WindowManager.LayoutParams(
-            dp(64), WindowManager.LayoutParams.WRAP_CONTENT,
+            dp(52), WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
@@ -587,6 +603,8 @@ class WritingAccessibilityService : AccessibilityService() {
         dismissButton = null
         nextButton = null
         previousButton = null
+        panelContent = null
+        panelScroll = null
     }
 
     fun applyReplacement(original: String, replacement: String, originalPackage: String): Boolean {
