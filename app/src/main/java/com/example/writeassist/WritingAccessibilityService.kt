@@ -124,10 +124,12 @@ class WritingAccessibilityService : AccessibilityService() {
         }
         lastText = value
         lastPackage = pkg
-        showBubble()
         val corrected = revision?.takeIf { revisionSource == value && revisionPackage == pkg }
             ?: LocalCorrections.correct(value).takeIf { it != value }
-        renderSuggestion(corrected, if (revision != null) suggestionOrigin else "Offline")
+        if (corrected != null) {
+            showBubble()
+            renderSuggestion(corrected, if (revision != null) suggestionOrigin else "Offline")
+        } else hideBubble()
         val prefs = getSharedPreferences("settings", MODE_PRIVATE)
         handler.removeCallbacks(autoCheck)
         if (prefs.getBoolean("auto_ai", false) && value.length in 12..1500 && lastRequestedKey != pkg + "|" + value) {
@@ -164,12 +166,11 @@ class WritingAccessibilityService : AccessibilityService() {
                     revisionSource = source
                     revisionPackage = pkg
                     suggestionOrigin = result.source
+                    showBubble()
                     renderSuggestion(result.text, result.source)
                     feedback?.text = if (result.source == "Local") result.notice else ""
                 } else {
-                    renderSuggestion(null, result.source)
-                    feedback?.text = if (result.source == "Local") result.notice
-                        else "No changes recommended."
+                    hideBubble()
                 }
             }
         }
@@ -200,7 +201,7 @@ class WritingAccessibilityService : AccessibilityService() {
             revision = null
             lastRequestedKey = pkg + "|" + corrected
             lastText = corrected
-            renderSuggestion(null, "")
+            hideBubble()
             handler.postDelayed(refresh, 350)
         } else {
             feedback?.text = "This text field does not allow direct replacement. Your text was not changed."
