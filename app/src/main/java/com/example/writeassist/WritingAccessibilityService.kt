@@ -34,6 +34,11 @@ class WritingAccessibilityService : AccessibilityService() {
     private var bubble: LinearLayout? = null
     private var title: TextView? = null
     private var suggestion: TextView? = null
+    private var originalPreview: TextView? = null
+    private var applyButton: TextView? = null
+    private var checkButton: TextView? = null
+    private var feedback: TextView? = null
+    private var suggestionOrigin = ""
     private var lastText = ""
     private var lastPackage = ""
     private val aiWorker = Executors.newSingleThreadExecutor()
@@ -122,11 +127,7 @@ class WritingAccessibilityService : AccessibilityService() {
         showBubble()
         val corrected = revision?.takeIf { revisionSource == value && revisionPackage == pkg }
             ?: LocalCorrections.correct(value).takeIf { it != value }
-        title?.text = if (corrected != null) "✦  Writing suggestion" else "✦  WriteAssist"
-        suggestion?.apply {
-            visibility = if (corrected == null) View.GONE else View.VISIBLE
-            text = if (corrected == null) "" else "Suggestion: " + corrected.take(180)
-        }
+        renderSuggestion(corrected, if (revision != null) suggestionOrigin else "Offline")
         val prefs = getSharedPreferences("settings", MODE_PRIVATE)
         handler.removeCallbacks(autoCheck)
         if (prefs.getBoolean("auto_ai", false) && value.length in 12..1500 && lastRequestedKey != pkg + "|" + value) {
@@ -134,61 +135,76 @@ class WritingAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun requestAiReview() {
+    private fun requestAiReview(force: Boolean = false) {
         val prefs = getSharedPreferences("settings", MODE_PRIVATE)
-        if (!prefs.getBoolean("auto_ai", false)) return
+        if (!force && !prefs.getBoolean("auto_ai", false)) return
         val source = lastText
         val pkg = lastPackage
         val requestGeneration = generation
         if (source.length !in 12..1500 || pkg.isBlank()) return
         val requestKey = pkg + "|" + source
-        if (lastRequestedKey == requestKey) return
+        if (!force && lastRequestedKey == requestKey) return
         lastRequestedKey = requestKey
+        checkButton?.text = "Checking with Gemini…"
+        feedback?.text = ""
         aiWorker.execute {
             val result = GeminiFallback.review(this, source,
                 "Correct spelling, grammar, punctuation, sentence structure, and natural flow.")
             handler.post {
                 if (generation != requestGeneration || lastText != source ||
-                    lastPackage != pkg || !prefs.getBoolean("auto_ai", false)) return@post
+                    lastPackage != pkg || (!force && !prefs.getBoolean("auto_ai", false))) return@post
                 val node = editableNode() ?: return@post
                 val stillSafe = !isSensitive(node) && node.isEditable &&
                     node.text?.toString() == source && node.packageName?.toString() == pkg
                 node.recycle()
                 if (!stillSafe) return@post
+                checkButton?.text = "Check with AI again  ›"
                 if (result.text != source && result.text.isNotBlank()) {
                     revision = result.text
                     revisionSource = source
                     revisionPackage = pkg
-                    showBubble()
-                    title?.text = if (result.source == "Local")
-                        "✦  Offline suggestion" else "✦  AI writing suggestion"
-                    suggestion?.visibility = View.VISIBLE
-                    suggestion?.text = result.text.take(180)
-                } else if (result.source == "Local") {
-                    title?.text = "✦  WriteAssist (offline)"
+                    suggestionOrigin = result.source
+                    renderSuggestion(result.text, result.source)
+                    feedback?.text = if (result.source == "Local") result.notice else ""
+                } else {
+                    renderSuggestion(null, result.source)
+                    feedback?.text = if (result.source == "Local") result.notice
+                        else "No changes recommended."
                 }
             }
         }
     }
 
-    private fun offlineSuggestion(text: String): String? {
-        var revised = text
-        val fixes = listOf(
-            "teh" to "the", "adn" to "and", "recieve" to "receive",
-            "recieved" to "received", "definately" to "definitely",
-            "seperate" to "separate", "occured" to "occurred",
-            "grammer" to "grammar"
-        )
-        for ((wrong, right) in fixes) {
-            revised = revised.replace(Regex("\\b" + wrong + "\\b", RegexOption.IGNORE_CASE)) {
-                if (it.value.firstOrNull()?.isUpperCase() == true) right.replaceFirstChar { ch -> ch.uppercase() }
-                else right
-            }
+    private fun renderSuggestion(corrected: String?, origin: String) {
+        val changed = !corrected.isNullOrBlank() && corrected != lastText
+        title?.text = if (changed) "✦  Correction available" else "✦  WriteAssist"
+        originalPreview?.visibility = if (changed) View.VISIBLE else View.GONE
+        originalPreview?.text = "Original: " + lastText.take(500)
+        suggestion?.visibility = if (changed) View.VISIBLE else View.GONE
+        suggestion?.text = if (changed) "Suggested (" + origin + "):\n" + corrected!!.take(900) else ""
+        applyButton?.visibility = if (changed) View.VISIBLE else View.GONE
+    }
+
+    private fun applySuggestion() {
+        val corrected = revision?.takeIf {
+            revisionSource == lastText && revisionPackage == lastPackage
+        } ?: LocalCorrections.correct(lastText).takeIf { it != lastText }
+        if (corrected.isNullOrBlank()) {
+            feedback?.text = "No correction available."
+            return
         }
-        revised = revised.replace(Regex(" {2,}"), " ")
-        revised = revised.replace(Regex("\\b([A-Za-z]{2,})\\s+\\1\\b", RegexOption.IGNORE_CASE), "$1")
-        revised = revised.replace(Regex("\\bi\\b"), "I")
-        return revised.takeIf { it != text }
+        val original = lastText
+        val pkg = lastPackage
+        if (applyReplacement(original, corrected, pkg)) {
+            feedback?.text = "Correction applied."
+            revision = null
+            lastRequestedKey = pkg + "|" + corrected
+            lastText = corrected
+            renderSuggestion(null, "")
+            handler.postDelayed(refresh, 350)
+        } else {
+            feedback?.text = "This text field does not allow direct replacement. Your text was not changed."
+        }
     }
 
     private fun showBubble() {
@@ -211,54 +227,56 @@ class WritingAccessibilityService : AccessibilityService() {
         }
         box.addView(heading)
         title = heading
-        val fix = TextView(this).apply {
-            textSize = 13f
-            setTextColor(if (dark) Color.rgb(230, 242, 237) else Color.rgb(31, 41, 55))
-            setPadding(0, dp(8), 0, dp(8))
+        val foreground = if (dark) Color.rgb(230, 242, 237) else Color.rgb(31, 41, 55)
+        val secondary = if (dark) Color.rgb(168, 184, 178) else Color.rgb(100, 116, 139)
+        val before = TextView(this).apply {
+            textSize = 12f
+            setTextColor(secondary)
+            setPadding(0, dp(9), 0, dp(5))
             visibility = View.GONE
-            setOnClickListener {
-                val corrected = revision?.takeIf { revisionSource == lastText && revisionPackage == lastPackage }
-                    ?: LocalCorrections.correct(lastText).takeIf { it != lastText } ?: return@setOnClickListener
-                val node = editableNode() ?: return@setOnClickListener
-                try {
-                    if (node.isEditable && !isSensitive(node) &&
-                        node.packageName?.toString() == lastPackage &&
-                        node.text?.toString() == lastText) {
-                        val args = Bundle().apply {
-                            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, corrected)
-                        }
-                        if (node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) {
-                            lastText = corrected
-                            updateFromFocus()
-                        }
-                    }
-                } finally { node.recycle() }
-            }
+        }
+        box.addView(before)
+        originalPreview = before
+        val fix = TextView(this).apply {
+            textSize = 14f
+            setTextColor(foreground)
+            setPadding(0, dp(5), 0, dp(9))
+            visibility = View.GONE
+            maxLines = 12
         }
         box.addView(fix)
         suggestion = fix
-        box.addView(TextView(this).apply {
+        val apply = TextView(this).apply {
+            text = "✓  Apply correction"
+            textSize = 14f
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            background = rounded(Color.rgb(21, 148, 96))
+            setPadding(dp(10), dp(12), dp(10), dp(12))
+            visibility = View.GONE
+            setOnClickListener { applySuggestion() }
+        }
+        box.addView(apply)
+        applyButton = apply
+        val check = TextView(this).apply {
             text = "Check with AI  ›"
             textSize = 13f
             setTextColor(Color.rgb(21, 148, 96))
-            setPadding(0, dp(8), 0, 0)
-            setOnClickListener {
-                val node = editableNode() ?: return@setOnClickListener
-                val safe = node.isEditable && !isSensitive(node) &&
-                    node.packageName?.toString() == lastPackage &&
-                    node.text?.toString() == lastText
-                node.recycle()
-                if (!safe) { hideBubble(); return@setOnClickListener }
-                capturedText = lastText
-                capturedPackage = lastPackage
-                hideBubble()
-                startActivity(Intent(this@WritingAccessibilityService, MainActivity::class.java)
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-                    .putExtra("accessibility_text", lastText))
-            }
-        })
+            setPadding(0, dp(12), 0, dp(6))
+            setOnClickListener { requestAiReview(force = true) }
+        }
+        box.addView(check)
+        checkButton = check
+        val note = TextView(this).apply {
+            textSize = 12f
+            setTextColor(secondary)
+            setPadding(0, dp(5), 0, 0)
+        }
+        box.addView(note)
+        feedback = note
         val params = WindowManager.LayoutParams(
-            dp(245), WindowManager.LayoutParams.WRAP_CONTENT,
+            dp(310), WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
@@ -284,6 +302,10 @@ class WritingAccessibilityService : AccessibilityService() {
         overlayTheme = ""
         title = null
         suggestion = null
+        originalPreview = null
+        applyButton = null
+        checkButton = null
+        feedback = null
     }
 
     fun applyReplacement(original: String, replacement: String, originalPackage: String): Boolean {
