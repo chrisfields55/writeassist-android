@@ -12,6 +12,23 @@ android {
         versionCode = 13
         versionName = "0.13"
     }
+    signingConfigs {
+        create("stableRelease") {
+            val path = System.getenv("WRITEASSIST_KEYSTORE_PATH")
+            if (!path.isNullOrBlank()) {
+                storeFile = file(path)
+                storePassword = System.getenv("WRITEASSIST_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("WRITEASSIST_KEY_ALIAS")
+                keyPassword = System.getenv("WRITEASSIST_KEY_PASSWORD")
+            }
+        }
+    }
+    buildTypes {
+        getByName("release") {
+            isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("stableRelease")
+        }
+    }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
