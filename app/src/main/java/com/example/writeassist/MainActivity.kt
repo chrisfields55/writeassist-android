@@ -44,11 +44,11 @@ class MainActivity : Activity() {
     private var sourceFromAccessibility: String? = null
     private var sourcePackage: String? = null
 
-    private val ink = Color.rgb(30, 41, 59)
-    private val muted = Color.rgb(100, 116, 139)
+    private val ink get() = if (AppTheme.isDark(this)) Color.rgb(231, 240, 236) else Color.rgb(30, 41, 59)
+    private val muted get() = if (AppTheme.isDark(this)) Color.rgb(168, 184, 178) else Color.rgb(100, 116, 139)
     private val green = Color.rgb(21, 148, 96)
-    private val surface = Color.WHITE
-    private val canvasColor = Color.rgb(246, 249, 248)
+    private val surface get() = if (AppTheme.isDark(this)) Color.rgb(30, 40, 41) else Color.WHITE
+    private val canvasColor get() = if (AppTheme.isDark(this)) Color.rgb(16, 23, 25) else Color.rgb(246, 249, 248)
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
     private fun shape(color: Int, radius: Int = 18, stroke: Int? = null): GradientDrawable =
@@ -70,7 +70,7 @@ class MainActivity : Activity() {
     }
     private fun card(parent: LinearLayout): LinearLayout {
         val child = vertical().apply {
-            background = shape(surface, 18, Color.rgb(229, 236, 233))
+            background = shape(surface, 18, if (AppTheme.isDark(this)) Color.rgb(57, 72, 68) else Color.rgb(229, 236, 233))
             setPadding(dp(18), dp(18), dp(18), dp(18))
             elevation = dp(1).toFloat()
         }
@@ -80,7 +80,7 @@ class MainActivity : Activity() {
     private fun action(text: String, primary: Boolean = false, onTap: () -> Unit): TextView =
         label(text, 15f, if (primary) Color.WHITE else green, true).apply {
             gravity = Gravity.CENTER
-            background = shape(if (primary) green else Color.rgb(234, 248, 240), 13)
+            background = shape(if (primary) green else if (AppTheme.isDark(this)) Color.rgb(23, 67, 53) else Color.rgb(234, 248, 240), 13)
             minHeight = dp(48)
             setPadding(dp(12), dp(12), dp(12), dp(12))
             setOnClickListener { onTap() }
@@ -92,7 +92,7 @@ class MainActivity : Activity() {
             textSize = 16f
             setTextColor(ink)
             setHintTextColor(muted)
-            background = shape(Color.rgb(250, 252, 251), 12, Color.rgb(221, 231, 226))
+            background = shape(if (AppTheme.isDark(this)) Color.rgb(35, 47, 47) else Color.rgb(250, 252, 251), 12, if (AppTheme.isDark(this)) Color.rgb(64, 83, 77) else Color.rgb(221, 231, 226))
             setPadding(dp(14), dp(12), dp(14), dp(12))
             gravity = Gravity.TOP
             minLines = lines
@@ -101,10 +101,10 @@ class MainActivity : Activity() {
         }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.statusBarColor = Color.rgb(248, 251, 249)
+        window.statusBarColor = canvasColor
         window.navigationBarColor = canvasColor
-        window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or
-            View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+        window.decorView.systemUiVisibility = if (AppTheme.isDark(this)) 0 else
+            View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
         processText = intent?.action == Intent.ACTION_PROCESS_TEXT
         readonly = intent?.getBooleanExtra(Intent.EXTRA_PROCESS_TEXT_READONLY, true) ?: true
         val accessibilityIncoming = intent?.getStringExtra("accessibility_text")
@@ -282,6 +282,19 @@ class MainActivity : Activity() {
         (apiKey.parent as? ViewGroup)?.removeView(apiKey)
         panel.addView(apiKey)
         addSpace(panel, 10)
+        panel.addView(label("Appearance", 13f, muted, true))
+        val appearance = Spinner(this).apply {
+            adapter = ArrayAdapter(this@MainActivity,
+                android.R.layout.simple_spinner_dropdown_item,
+                arrayOf("Follow system", "Light", "Dark"))
+            setSelection(when (prefs.getString("appearance", "system")) {
+                "light" -> 1
+                "dark" -> 2
+                else -> 0
+            })
+        }
+        panel.addView(appearance)
+        addSpace(panel, 12)
         val auto = Switch(this).apply {
             text = "Automatically check writing with AI"
             textSize = 14f
@@ -299,7 +312,9 @@ class MainActivity : Activity() {
             .setPositiveButton("Save settings") { _, _ ->
                 prefs.edit().putString("endpoint", endpoint.text.toString().trim())
                     .putString("model", model.text.toString().trim())
-                    .putBoolean("auto_ai", auto.isChecked).apply()
+                    .putBoolean("auto_ai", auto.isChecked)
+                    .putString("appearance", arrayOf("system", "light", "dark")[appearance.selectedItemPosition]).apply()
+                recreate()
                 try { ApiCredentials.save(this, apiKey.text.toString().trim()) }
                 catch (_: Exception) { Toast.makeText(this, "Unable to store API key securely", Toast.LENGTH_LONG).show() }
             }
