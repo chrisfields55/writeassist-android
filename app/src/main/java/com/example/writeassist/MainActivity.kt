@@ -249,7 +249,7 @@ class MainActivity : Activity() {
             })
         }
         addSpace(root, 18)
-        root.addView(label("WriteAssist • Private by design • AI on demand", 12f, muted).apply {
+        root.addView(label("WriteAssist • Automatic AI is optional", 12f, muted).apply {
             gravity = Gravity.CENTER
         })
         setContentView(scroll)
@@ -261,6 +261,7 @@ class MainActivity : Activity() {
             setText(prefs.getString("model", "gpt-4.1-mini"))
         }
         apiKey = EditText(this).apply {
+            setText(ApiCredentials.load(this@MainActivity) ?: "")
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
         }
     }
@@ -276,11 +277,19 @@ class MainActivity : Activity() {
         (model.parent as? ViewGroup)?.removeView(model)
         panel.addView(model)
         addSpace(panel, 12)
-        panel.addView(label("API key (not saved)", 13f, muted, true))
+        panel.addView(label("API key (encrypted on device)", 13f, muted, true))
         (apiKey.parent as? ViewGroup)?.removeView(apiKey)
         panel.addView(apiKey)
         addSpace(panel, 10)
-        panel.addView(label("Your key stays in memory while this app is open. Writing is sent only when you tap Improve.", 12f, muted))
+        val auto = Switch(this).apply {
+            text = "Automatically check writing with AI"
+            textSize = 14f
+            isChecked = prefs.getBoolean("auto_ai", false)
+        }
+        addSpace(panel, 14)
+        panel.addView(auto)
+        addSpace(panel, 10)
+        panel.addView(label("When enabled, supported text fields are checked after a pause in typing. Text is sent to your configured AI provider automatically. Suggestions are never applied without your approval. Password fields are excluded. You may disable this at any time.", 12f, muted))
         val parent = panel.parent
         if (parent is ViewGroup) parent.removeView(panel)
         android.app.AlertDialog.Builder(this)
@@ -288,7 +297,10 @@ class MainActivity : Activity() {
             .setView(panel)
             .setPositiveButton("Save settings") { _, _ ->
                 prefs.edit().putString("endpoint", endpoint.text.toString().trim())
-                    .putString("model", model.text.toString().trim()).apply()
+                    .putString("model", model.text.toString().trim())
+                    .putBoolean("auto_ai", auto.isChecked).apply()
+                try { ApiCredentials.save(this, apiKey.text.toString().trim()) }
+                catch (_: Exception) { Toast.makeText(this, "Unable to store API key securely", Toast.LENGTH_LONG).show() }
             }
             .setNegativeButton("Close", null)
             .show()
