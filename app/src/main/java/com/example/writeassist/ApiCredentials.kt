@@ -34,7 +34,8 @@ object ApiCredentials {
             .putString("iv", Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
             .putString("key", Base64.encodeToString(ciphertext, Base64.NO_WRAP)).apply()
     }
-    fun load(context: Context): String? = try {
+    fun load(context: Context): String? {
+        return try {
         val p = context.getSharedPreferences("secure", Context.MODE_PRIVATE)
         val iv = Base64.decode(p.getString("iv", null) ?: return null, Base64.NO_WRAP)
         val ciphertext = Base64.decode(p.getString("key", null) ?: return null, Base64.NO_WRAP)
@@ -42,4 +43,5 @@ object ApiCredentials {
         cipher.init(Cipher.DECRYPT_MODE, secret(), GCMParameterSpec(128, iv))
         String(cipher.doFinal(ciphertext), Charsets.UTF_8)
     } catch (_: Exception) { null }
+    }
 }
