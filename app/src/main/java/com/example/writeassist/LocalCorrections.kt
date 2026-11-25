@@ -7,7 +7,7 @@ package com.example.writeassist
 object LocalCorrections {
     private val dictionary = mapOf(
         "teh" to "the", "adn" to "and", "recieve" to "receive",
-        "recieved" to "received", "definately" to "definitely",
+        "recieved" to "received", "helllo" to "hello", "definately" to "definitely",
         "seperate" to "separate", "occured" to "occurred",
         "grammer" to "grammar", "dont" to "don't", "cant" to "can't",
         "wont" to "won't", "doesnt" to "doesn't", "isnt" to "isn't",
