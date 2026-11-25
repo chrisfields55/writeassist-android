@@ -9,8 +9,8 @@ android {
         applicationId = "com.example.writeassist"
         minSdk = 26
         targetSdk = 35
-        versionCode = 16
-        versionName = "0.16"
+        versionCode = 17
+        versionName = "0.17"
     }
     signingConfigs {
         create("stableRelease") {
