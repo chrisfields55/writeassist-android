@@ -13,6 +13,7 @@ import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityWindowInfo
 import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.ScrollView
 import android.widget.LinearLayout
@@ -93,7 +94,24 @@ class WritingAccessibilityService : AccessibilityService() {
     }
 
     private fun editableNode(): AccessibilityNodeInfo? {
-        val root = rootInActiveWindow ?: return null
+        findEditableFocus(rootInActiveWindow)?.let { return it }
+        // The active root can belong to the keyboard while the app retains input focus.
+        val appWindows = windows
+        try {
+            for (window in appWindows) {
+                if (window.type == AccessibilityWindowInfo.TYPE_APPLICATION &&
+                    (window.isFocused || window.isActive)) {
+                    findEditableFocus(window.root)?.let { return it }
+                }
+            }
+        } finally {
+            appWindows.forEach { it.recycle() }
+        }
+        return null
+    }
+
+    private fun findEditableFocus(root: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+        if (root == null) return null
         val focused = try { root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) }
             finally { root.recycle() }
         if (focused == null) return null
