@@ -43,6 +43,7 @@ class WritingAccessibilityService : AccessibilityService() {
     private var panelScroll: ScrollView? = null
     private var panelContent: LinearLayout? = null
     private var stylePreview: String? = null
+    private var styleRange = IntRange.EMPTY
     private var styleOriginal = ""
     private var styleName = ""
     private var styleGeneration = 0
@@ -82,7 +83,15 @@ class WritingAccessibilityService : AccessibilityService() {
         if (event == null) return
         when (event.eventType) {
             AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED,
-            AccessibilityEvent.TYPE_VIEW_FOCUSED,
+            AccessibilityEvent.TYPE_VIEW_FOCUSED -> {
+                val source = event.source
+                if (source != null && source.refresh() && isLiveEditor(source)) {
+                    updateFromFocus(source)
+                } else {
+                    source?.recycle()
+                    updateFromFocus()
+                }
+            }
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
             AccessibilityEvent.TYPE_WINDOWS_CHANGED -> updateFromFocus()
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED ->
@@ -94,6 +103,11 @@ class WritingAccessibilityService : AccessibilityService() {
     }
 
     private fun editableNode(): AccessibilityNodeInfo? {
+        val systemFocus = findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+        if (systemFocus != null) {
+            if (isLiveEditor(systemFocus)) return systemFocus
+            systemFocus.recycle()
+        }
         findEditableFocus(rootInActiveWindow)?.let { return it }
         // The active root can belong to the keyboard while the app retains input focus.
         val appWindows = windows
@@ -115,11 +129,15 @@ class WritingAccessibilityService : AccessibilityService() {
         val focused = try { root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) }
             finally { root.recycle() }
         if (focused == null) return null
-        if (focused.isFocused && focused.isEditable && focused.packageName?.toString() != packageName &&
-            !isSensitive(focused)) return focused
+        if (isLiveEditor(focused)) return focused
         focused.recycle()
         return null
     }
+
+    private fun isLiveEditor(node: AccessibilityNodeInfo): Boolean =
+        node.isFocused && node.isVisibleToUser &&
+            (node.isEditable || node.actionList.any { it.id == AccessibilityNodeInfo.ACTION_SET_TEXT }) &&
+            node.packageName?.toString() != packageName && !isSensitive(node)
 
     private fun clearSession() {
         editor?.recycle()
@@ -152,9 +170,13 @@ class WritingAccessibilityService : AccessibilityService() {
                 variation == InputType.TYPE_NUMBER_VARIATION_PASSWORD)
     }
 
-    private fun updateFromFocus() {
-        if (!AssistantControls.enabled(this)) { clearSession(); return }
-        val node = editableNode() ?: run { clearSession(); return }
+    private fun updateFromFocus(eventEditor: AccessibilityNodeInfo? = null) {
+        if (!AssistantControls.enabled(this)) {
+            eventEditor?.recycle()
+            clearSession()
+            return
+        }
+        val node = eventEditor ?: editableNode() ?: run { clearSession(); return }
         val pkg = node.packageName?.toString().orEmpty()
         val value = if (node.isShowingHintText) "" else node.text?.toString().orEmpty()
         if (pkg.isBlank() || value.length > 2500) {
@@ -348,6 +370,7 @@ class WritingAccessibilityService : AccessibilityService() {
             "Professional" to "Rewrite clearly and professionally, preserving all facts.",
             "Friendly" to "Rewrite in a warm, approachable tone.",
             "Informal" to "Rewrite in relaxed, conversational language.",
+            "Rephrase sentence" to "Rephrase this sentence for natural, clear wording. Preserve its meaning.",
             "Formal" to "Rewrite with formal and respectful language.",
             "Concise" to "Make this shorter while preserving the important meaning.",
             "Confident" to "Make this direct and confident without exaggeration.",
@@ -395,7 +418,9 @@ class WritingAccessibilityService : AccessibilityService() {
                 background = rounded(Color.rgb(21, 148, 96))
                 setPadding(dp(8), dp(12), dp(8), dp(12))
                 setOnClickListener {
-                    if (applyReplacement(styleOriginal, preview)) {
+                    val edit = SuggestionDiff.Edit(styleRange.first, styleRange.last + 1,
+                        styleOriginal.substring(styleRange), preview)
+                    if (applyReplacement(styleOriginal, SuggestionDiff.apply(styleOriginal, edit), edit)) {
                         stylePreview = null
                         expanded = false
                         handler.postDelayed(refresh, 300)
@@ -414,13 +439,18 @@ class WritingAccessibilityService : AccessibilityService() {
     private fun requestStyle(name: String, instruction: String) {
         val source = lastText
         if (source.isBlank()) { feedback?.text = "Type something first."; return }
+        val range = if (name == "Rephrase sentence") currentSentence(source) ?: run {
+            feedback?.text = "Place the cursor inside the sentence you want to rephrase."
+            return
+        } else source.indices
+        val excerpt = source.substring(range)
         val pkg = lastPackage
         val token = ++styleGeneration
         styleBusy = true
         stylePreview = null
         renderAssistantPanel()
         aiWorker.execute {
-            val result = GeminiFallback.review(this, source, instruction)
+            val result = GeminiFallback.review(this, excerpt, instruction)
             handler.post {
                 if (token != styleGeneration || lastText != source || lastPackage != pkg) return@post
                 styleBusy = false
@@ -430,11 +460,31 @@ class WritingAccessibilityService : AccessibilityService() {
                 } else {
                     styleOriginal = source
                     styleName = name
-                    stylePreview = result.text
+                    stylePreview = result.text.trim()
+                    styleRange = range
                     renderAssistantPanel()
                 }
             }
         }
+    }
+
+    private fun currentSentence(source: String): IntRange? {
+        val node = editableNode() ?: return null
+        val caret = try {
+            if (node != editor || node.text?.toString() != source) return null
+            node.textSelectionEnd
+        } finally { node.recycle() }
+        if (caret !in 0..source.length) return null
+        val sentences = java.text.BreakIterator.getSentenceInstance(java.util.Locale.ENGLISH)
+        sentences.setText(source)
+        val index = caret.coerceAtMost(source.lastIndex)
+        val start = sentences.preceding(index + 1)
+        val end = sentences.following(index)
+        if (start < 0 || end <= start) return null
+        val segment = source.substring(start, end)
+        val first = segment.indexOfFirst { !it.isWhitespace() }
+        val last = segment.indexOfLast { !it.isWhitespace() }
+        return if (first >= 0) (start + first)..(start + last) else null
     }
 
     private fun showBubble() {
