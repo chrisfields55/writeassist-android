@@ -43,4 +43,17 @@ class ProofreadingTest {
         assertEquals(revision,
             SuggestionDiff.between(draft, revision).asReversed().fold(draft, SuggestionDiff::apply))
     }
+    @org.junit.Test
+    fun acceptingOneEditKeepsIndependentSuggestions() {
+        val original = "We recieved teh mesage."
+        val accepted = SuggestionDiff.Edit(3, 11, "recieved", "got")
+        val updated = SuggestionDiff.apply(original, accepted)
+        val second = SuggestionDiff.Edit(12, 15, "teh", "the")
+        val third = SuggestionDiff.Edit(16, 22, "mesage", "message")
+        org.junit.Assert.assertEquals(second.copy(start = 7, end = 10),
+            SuggestionDiff.afterAccepting(second, accepted, updated))
+        org.junit.Assert.assertEquals(third.copy(start = 11, end = 17),
+            SuggestionDiff.afterAccepting(third, accepted, updated))
+        org.junit.Assert.assertNull(SuggestionDiff.afterAccepting(accepted, accepted, updated))
+    }
 }
