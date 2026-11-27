@@ -56,6 +56,7 @@ class WritingAccessibilityService : AccessibilityService() {
     private var bubbleX = -1
     private var bubbleY = -1
     private var expanded = false
+    private var sentenceSuggestion: SuggestionDiff.Edit? = null
     private var activeEdits: List<SuggestionDiff.Edit> = emptyList()
     private var lastText = ""
     private var lastPackage = ""
@@ -150,6 +151,7 @@ class WritingAccessibilityService : AccessibilityService() {
         lastText = ""
         lastPackage = ""
         activeEdits = emptyList()
+        sentenceSuggestion = null
         ignoredSuggestions.clear()
         expanded = false
         handler.removeCallbacks(autoCheck)
@@ -191,6 +193,7 @@ class WritingAccessibilityService : AccessibilityService() {
         } else node.recycle()
         val changed = changedEditor || value != lastText
         if (changed) {
+            sentenceSuggestion = null
             styleGeneration++
             styleBusy = false
             stylePreview = null
@@ -220,6 +223,10 @@ class WritingAccessibilityService : AccessibilityService() {
         val pkg = lastPackage
         val requestGeneration = generation
         if (source.length !in 12..2500 || pkg.isBlank()) return
+        val sentenceRange = currentSentence(source)?.takeIf { range ->
+            val sentence = source.substring(range)
+            sentence.length in 20..500 && sentence.last() in ".!?"
+        }
         val requestKey = source
         if (!force && lastRequestedKey == requestKey) return
         lastRequestedKey = requestKey
@@ -227,7 +234,7 @@ class WritingAccessibilityService : AccessibilityService() {
         feedback?.text = ""
         aiWorker.execute {
             val result = GeminiFallback.review(this, source,
-                "Correct spelling, grammar, punctuation, sentence structure, and natural flow.")
+                "Correct spelling, grammar, and punctuation with minimal wording changes.")
             handler.post {
                 if (generation != requestGeneration || lastText != source ||
                     lastPackage != pkg || (!force && !prefs.getBoolean("auto_ai", false))) return@post
@@ -248,9 +255,33 @@ class WritingAccessibilityService : AccessibilityService() {
                     renderAssistantPanel()
                     feedback?.text = result.notice
                 }
+                if (result.source != "Local" && sentenceRange != null) {
+                    requestSentenceSuggestion(source, sentenceRange, requestGeneration, force)
+                }
             }
         }
     }
+
+    private fun requestSentenceSuggestion(source: String, range: IntRange, token: Int, force: Boolean) {
+        val original = source.substring(range)
+        aiWorker.execute {
+            val result = GeminiFallback.review(this, original,
+                "Return a clearer phrasing only when this complete sentence has a meaningful clarity or flow problem. Otherwise return it unchanged. Keep the same meaning and return one sentence.")
+            handler.post {
+                if (token != generation || lastText != source ||
+                    (!force && !settings.getBoolean("auto_ai", false))) return@post
+                if (currentSentence(source) != range) return@post
+                val candidate = result.text.trim()
+                if (result.source == "Local" || candidate.isBlank() || candidate.contains('\n') ||
+                    candidate == original || candidate == LocalCorrections.correct(original)) return@post
+                sentenceSuggestion = SuggestionDiff.Edit(range.first, range.last + 1, original, candidate)
+                renderAssistantPanel()
+            }
+        }
+    }
+
+    private fun visibleSuggestions(): List<SuggestionDiff.Edit> =
+        (activeEdits + listOfNotNull(sentenceSuggestion)).filter { suggestionId(it) !in ignoredSuggestions }
 
     private fun resizeBubble() {
         val view = bubble ?: return
@@ -269,8 +300,8 @@ class WritingAccessibilityService : AccessibilityService() {
         val dark = AppTheme.isDark(this)
         val foreground = if (dark) Color.WHITE else Color.rgb(30, 41, 49)
         val muted = if (dark) Color.LTGRAY else Color.DKGRAY
-        title?.text = if (expanded) "W   WriteAssist   ×" else activeEdits.count { suggestionId(it) !in ignoredSuggestions }.takeIf { it > 0 }?.toString() ?: "W"
-        title?.contentDescription = if (expanded) "Close WriteAssist" else "Open WriteAssist, " + activeEdits.count { suggestionId(it) !in ignoredSuggestions } + " suggestions"
+        title?.text = if (expanded) "W   WriteAssist   ×" else visibleSuggestions().size.takeIf { it > 0 }?.toString() ?: "W"
+        title?.contentDescription = if (expanded) "Close WriteAssist" else "Open WriteAssist, " + visibleSuggestions().size + " suggestions"
         title?.gravity = if (expanded) Gravity.START else Gravity.CENTER
         checkButton?.visibility = if (expanded && reviewTab) View.VISIBLE else View.GONE
         feedback?.visibility = if (expanded) View.VISIBLE else View.GONE
@@ -290,7 +321,7 @@ class WritingAccessibilityService : AccessibilityService() {
             setPadding(dp(10), dp(12), dp(10), dp(12))
             setOnClickListener { action() }
         }
-        tabs.addView(tab("Suggestions (" + activeEdits.count { suggestionId(it) !in ignoredSuggestions } + ")", reviewTab) {
+        tabs.addView(tab("Suggestions (" + visibleSuggestions().size + ")", reviewTab) {
             reviewTab = true; renderAssistantPanel()
         }, LinearLayout.LayoutParams(0, dp(48), 1f))
         tabs.addView(tab("Rewrite", !reviewTab) {
@@ -298,7 +329,7 @@ class WritingAccessibilityService : AccessibilityService() {
         }, LinearLayout.LayoutParams(0, dp(48), 1f))
         panel.addView(tabs)
         if (reviewTab) {
-            val visible = activeEdits.filter { suggestionId(it) !in ignoredSuggestions }
+            val visible = visibleSuggestions()
             if (visible.isEmpty()) {
                 panel.addView(TextView(this).apply {
                     text = "No suggestions yet. Keep typing or check with AI."
@@ -316,6 +347,7 @@ class WritingAccessibilityService : AccessibilityService() {
                     background = rounded(if (dark) Color.rgb(43, 53, 54) else Color.rgb(245, 247, 246))
                 }
                 val category = when {
+                    edit == sentenceSuggestion -> "Clarity · Rephrase sentence"
                     edit.before.isBlank() -> "Correctness · Add text"
                     edit.after.isBlank() -> "Correctness · Remove text"
                     edit.before.trim().equals(edit.after.trim(), ignoreCase = true) -> "Correctness · Formatting"
