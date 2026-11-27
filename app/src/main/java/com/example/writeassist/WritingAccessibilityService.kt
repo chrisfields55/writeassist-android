@@ -84,10 +84,6 @@ class WritingAccessibilityService : AccessibilityService() {
                 AssistantControls.updateNotification(this)
                 updateFromFocus()
             }
-            "auto_ai" -> {
-                handler.removeCallbacks(autoCheck)
-                updateFromFocus()
-            }
             "appearance" -> { hideBubble(); updateFromFocus() }
         }
     }
@@ -120,11 +116,8 @@ class WritingAccessibilityService : AccessibilityService() {
     private var activeEdits: List<SuggestionDiff.Edit> = emptyList()
     private var lastText = ""
     private var lastPackage = ""
-    private val aiWorker = Executors.newSingleThreadExecutor()
     private var generation = 0
-    private var lastRequestedKey = ""
     private var overlayTheme = ""
-    private val autoCheck = Runnable { requestAiReview() }
     private val refresh = Runnable { updateFromFocus() }
 
     private fun dp(n: Int) = (n * resources.displayMetrics.density).toInt()
@@ -208,7 +201,6 @@ class WritingAccessibilityService : AccessibilityService() {
         styleGeneration++
         styleBusy = false
         stylePreview = null
-        lastRequestedKey = ""
         lastText = ""
         lastPackage = ""
         acceptedEdit = null
@@ -216,7 +208,6 @@ class WritingAccessibilityService : AccessibilityService() {
         sentenceSuggestion = null
         ignoredSuggestions.clear()
         expanded = false
-        handler.removeCallbacks(autoCheck)
         hideBubble()
     }
 
@@ -273,7 +264,6 @@ class WritingAccessibilityService : AccessibilityService() {
             styleBusy = false
             stylePreview = null
             generation++
-            lastRequestedKey = ""
             ignoredSuggestions.clear()
         }
         lastText = value
@@ -292,72 +282,16 @@ class WritingAccessibilityService : AccessibilityService() {
             if (accepted != null) sentenceSuggestion = accepted.rephrase
             renderAssistantPanel()
         }
-        if (changed || !settings.getBoolean("auto_ai", false)) handler.removeCallbacks(autoCheck)
-        if ((changed || needsOverlay) && settings.getBoolean("auto_ai", false) &&
-            value.length in 12..2500 && lastRequestedKey != value) {
-            handler.postDelayed(autoCheck, 1500)
-        }
     }
 
-    private fun requestAiReview(force: Boolean = false) {
-        val prefs = getSharedPreferences("settings", MODE_PRIVATE)
-        if (!force && !prefs.getBoolean("auto_ai", false)) return
-        val source = lastText
-        val pkg = lastPackage
-        val requestGeneration = generation
-        if (source.length !in 12..2500 || pkg.isBlank()) return
-        val sentenceRange = currentSentence(source)?.takeIf { range ->
-            val sentence = source.substring(range)
-            sentence.length in 20..500 && sentence.last() in ".!?"
+    private fun openNanoReview() {
+        if (lastText.isBlank() || liveCaret(lastText) == null) return
+        val review = android.content.Intent(this, MainActivity::class.java).apply {
+            action = android.content.Intent.ACTION_SEND
+            putExtra(android.content.Intent.EXTRA_TEXT, lastText)
+            addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
         }
-        val requestKey = source
-        if (!force && lastRequestedKey == requestKey) return
-        lastRequestedKey = requestKey
-        checkButton?.text = "Checking with Gemini…"
-        feedback?.text = ""
-        aiWorker.execute {
-            val result = GeminiFallback.review(this, source,
-                "Correct spelling, grammar, and punctuation with minimal wording changes.")
-            handler.post {
-                if (generation != requestGeneration || lastText != source ||
-                    lastPackage != pkg || (!force && !prefs.getBoolean("auto_ai", false))) return@post
-                val stillSafe = liveCaret(source) != null
-                if (!stillSafe) { checkButton?.text = "Check grammar with AI"; return@post }
-                checkButton?.text = "Check with AI again  ›"
-                if (result.text != source && result.text.isNotBlank()) {
-                    if (result.source != "Local") {
-                        showBubble()
-                        activeEdits = SuggestionDiff.between(source, result.text)
-                        renderAssistantPanel()
-                    }
-                    feedback?.text = if (result.source == "Local") result.notice else ""
-                } else {
-                    renderAssistantPanel()
-                    feedback?.text = result.notice
-                }
-                if (result.source != "Local" && sentenceRange != null) {
-                    requestSentenceSuggestion(source, sentenceRange, requestGeneration, force)
-                }
-            }
-        }
-    }
-
-    private fun requestSentenceSuggestion(source: String, range: IntRange, token: Int, force: Boolean) {
-        val original = source.substring(range)
-        aiWorker.execute {
-            val result = GeminiFallback.review(this, original,
-                "Return a clearer phrasing only when this complete sentence has a meaningful clarity or flow problem. Otherwise return it unchanged. Keep the same meaning and return one sentence.")
-            handler.post {
-                if (token != generation || lastText != source ||
-                    (!force && !settings.getBoolean("auto_ai", false))) return@post
-                if (currentSentence(source) != range) return@post
-                val candidate = result.text.trim()
-                if (result.source == "Local" || candidate.isBlank() || candidate.contains('\n') ||
-                    candidate == original || candidate == LocalCorrections.correct(original)) return@post
-                sentenceSuggestion = SuggestionDiff.Edit(range.first, range.last + 1, original, candidate)
-                renderAssistantPanel()
-            }
-        }
+        startActivity(review)
     }
 
     private fun visibleSuggestions(): List<SuggestionDiff.Edit> =
@@ -389,7 +323,7 @@ class WritingAccessibilityService : AccessibilityService() {
         panel.removeAllViews()
         feedback?.text = ""
         panelScroll?.visibility = if (expanded) View.VISIBLE else View.GONE
-        checkButton?.text = "Check full text with AI  ›"
+        checkButton?.text = "Open Gemini Nano review  ›"
         if (!expanded) { resizeBubble(); return }
         val tabs = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         fun tab(label: String, selected: Boolean, action: () -> Unit) = TextView(this).apply {
@@ -535,7 +469,7 @@ class WritingAccessibilityService : AccessibilityService() {
                 textSize = 14f
                 setTextColor(foreground)
                 setPadding(dp(8), dp(10), dp(8), dp(10))
-                setOnClickListener { requestStyle(name, instruction) }
+                setOnClickListener { openNanoReview() }
             }
             panel.addView(item)
         }
@@ -578,38 +512,6 @@ class WritingAccessibilityService : AccessibilityService() {
         }
         feedback?.setTextColor(muted)
         resizeBubble()
-    }
-
-    private fun requestStyle(name: String, instruction: String) {
-        val source = lastText
-        if (source.isBlank()) { feedback?.text = "Type something first."; return }
-        val range = if (name == "Rephrase sentence") currentSentence(source) ?: run {
-            feedback?.text = "Place the cursor inside the sentence you want to rephrase."
-            return
-        } else source.indices
-        val excerpt = source.substring(range)
-        val pkg = lastPackage
-        val token = ++styleGeneration
-        styleBusy = true
-        stylePreview = null
-        renderAssistantPanel()
-        aiWorker.execute {
-            val result = GeminiFallback.review(this, excerpt, instruction)
-            handler.post {
-                if (token != styleGeneration || lastText != source || lastPackage != pkg) return@post
-                styleBusy = false
-                if (result.source == "Local") {
-                    renderAssistantPanel()
-                    feedback?.text = result.notice.ifBlank { "AI rewrite unavailable. Check your Gemini key and connection." }
-                } else {
-                    styleOriginal = source
-                    styleName = name
-                    stylePreview = result.text.trim()
-                    styleRange = range
-                    renderAssistantPanel()
-                }
-            }
-        }
     }
 
     private fun liveCaret(source: String): Int? {
@@ -678,12 +580,12 @@ class WritingAccessibilityService : AccessibilityService() {
         val foreground = if (dark) Color.WHITE else Color.rgb(31, 41, 55)
         val secondary = if (dark) Color.LTGRAY else Color.DKGRAY
         checkButton = TextView(this).apply {
-            text = "Check grammar with AI"
+            text = "Open Gemini Nano review"
             textSize = 13f
             setTextColor(Color.rgb(21, 148, 96))
             setPadding(0, dp(10), 0, dp(8))
             visibility = View.GONE
-            setOnClickListener { requestAiReview(true) }
+            setOnClickListener { openNanoReview() }
         }.also { box.addView(it) }
         feedback = TextView(this).apply {
             visibility = View.GONE
@@ -827,7 +729,6 @@ class WritingAccessibilityService : AccessibilityService() {
         AssistantControls.cancelNotification(this)
         handler.removeCallbacksAndMessages(null)
         clearSession()
-        aiWorker.shutdownNow()
         super.onDestroy()
     }
 }
