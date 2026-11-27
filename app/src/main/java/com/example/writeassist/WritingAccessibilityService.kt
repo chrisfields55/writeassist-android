@@ -21,7 +21,6 @@ import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.ScrollView
 import android.widget.LinearLayout
 import android.widget.TextView
-import java.util.concurrent.Executors
 
 class WritingAccessibilityService : AccessibilityService() {
     private val handler = Handler(Looper.getMainLooper())
@@ -91,12 +90,6 @@ class WritingAccessibilityService : AccessibilityService() {
     private var bubbleParams: WindowManager.LayoutParams? = null
     private var panelScroll: ScrollView? = null
     private var panelContent: LinearLayout? = null
-    private var stylePreview: String? = null
-    private var styleRange = IntRange.EMPTY
-    private var styleOriginal = ""
-    private var styleName = ""
-    private var styleGeneration = 0
-    private var styleBusy = false
     private var title: TextView? = null
     private var checkButton: TextView? = null
     private var feedback: TextView? = null
@@ -105,11 +98,9 @@ class WritingAccessibilityService : AccessibilityService() {
     private var bubbleX = -1
     private var bubbleY = -1
     private var expanded = false
-    private var sentenceSuggestion: SuggestionDiff.Edit? = null
     private data class AcceptedEdit(
         val expectedText: String,
         val remaining: List<SuggestionDiff.Edit>,
-        val rephrase: SuggestionDiff.Edit?,
         val expiresAt: Long
     )
     private var acceptedEdit: AcceptedEdit? = null
@@ -198,14 +189,10 @@ class WritingAccessibilityService : AccessibilityService() {
         editor = null
         inputSnapshot = null
         generation++
-        styleGeneration++
-        styleBusy = false
-        stylePreview = null
         lastText = ""
         lastPackage = ""
         acceptedEdit = null
         activeEdits = emptyList()
-        sentenceSuggestion = null
         ignoredSuggestions.clear()
         expanded = false
         hideBubble()
@@ -259,10 +246,6 @@ class WritingAccessibilityService : AccessibilityService() {
         }
         if (changed) acceptedEdit = null
         if (changed) {
-            sentenceSuggestion = null
-            styleGeneration++
-            styleBusy = false
-            stylePreview = null
             generation++
             ignoredSuggestions.clear()
         }
@@ -279,7 +262,6 @@ class WritingAccessibilityService : AccessibilityService() {
                         it.start < candidate.end && candidate.start < it.end }
                 }).sortedBy { it.start }
             }
-            if (accepted != null) sentenceSuggestion = accepted.rephrase
             renderAssistantPanel()
         }
     }
@@ -295,7 +277,7 @@ class WritingAccessibilityService : AccessibilityService() {
     }
 
     private fun visibleSuggestions(): List<SuggestionDiff.Edit> =
-        (activeEdits + listOfNotNull(sentenceSuggestion)).filter { suggestionId(it) !in ignoredSuggestions }
+        activeEdits.filter { suggestionId(it) !in ignoredSuggestions }
 
     private fun resizeBubble() {
         val view = bubble ?: return
@@ -384,7 +366,6 @@ class WritingAccessibilityService : AccessibilityService() {
                     background = rounded(if (dark) Color.rgb(43, 53, 54) else Color.rgb(245, 247, 246))
                 }
                 val category = when {
-                    edit == sentenceSuggestion -> "Clarity · Rephrase sentence"
                     edit.before.isBlank() -> "Correctness · Add text"
                     edit.after.isBlank() -> "Correctness · Remove text"
                     edit.before.trim().equals(edit.after.trim(), ignoreCase = true) -> "Correctness · Formatting"
@@ -424,9 +405,7 @@ class WritingAccessibilityService : AccessibilityService() {
                         val replacement = SuggestionDiff.apply(snapshot, edit)
                         val remaining = activeEdits.filter { suggestionId(it) !in ignoredSuggestions }
                             .mapNotNull { SuggestionDiff.afterAccepting(it, edit, replacement) }
-                        val rephrase = sentenceSuggestion?.takeUnless { suggestionId(it) in ignoredSuggestions }
-                            ?.let { SuggestionDiff.afterAccepting(it, edit, replacement) }
-                        acceptedEdit = AcceptedEdit(replacement, remaining, rephrase,
+                        acceptedEdit = AcceptedEdit(replacement, remaining,
                             android.os.SystemClock.uptimeMillis() + 3000)
                         if (applyReplacement(snapshot, replacement, edit)) {
                             scheduleInputRefresh()
@@ -444,73 +423,7 @@ class WritingAccessibilityService : AccessibilityService() {
             resizeBubble()
             return
         }
-        val styles = listOf(
-            "Professional" to "Rewrite clearly and professionally, preserving all facts.",
-            "Friendly" to "Rewrite in a warm, approachable tone.",
-            "Informal" to "Rewrite in relaxed, conversational language.",
-            "Rephrase sentence" to "Rephrase this sentence for natural, clear wording. Preserve its meaning.",
-            "Formal" to "Rewrite with formal and respectful language.",
-            "Concise" to "Make this shorter while preserving the important meaning.",
-            "Confident" to "Make this direct and confident without exaggeration.",
-            "Emojify" to "Add suitable emojis naturally while keeping the original meaning.",
-            "Improve" to "Improve grammar, clarity, and flow without changing the meaning."
-        )
-        val header = TextView(this).apply {
-            text = "Rewrite your text"
-            textSize = 15f
-            setTextColor(foreground)
-            setPadding(0, dp(14), 0, dp(8))
-        }
-        panel.addView(header)
-        val options = if (stylePreview == null) styles else emptyList()
-        for ((name, instruction) in options) {
-            val item = TextView(this).apply {
-                text = name + "   ›"
-                textSize = 14f
-                setTextColor(foreground)
-                setPadding(dp(8), dp(10), dp(8), dp(10))
-                setOnClickListener { openNanoReview() }
-            }
-            panel.addView(item)
-        }
-        if (styleBusy) panel.addView(TextView(this).apply {
-            text = "Generating rewrite…"
-            textSize = 13f
-            setTextColor(muted)
-            setPadding(0, dp(8), 0, dp(8))
-        })
-        val preview = stylePreview
-        if (preview != null) {
-            panel.addView(TextView(this).apply {
-                text = styleName + " preview:\n" + preview
-                textSize = 14f
-                setTextColor(foreground)
-                setPadding(0, dp(12), 0, dp(12))
-                maxLines = 10
-            })
-            panel.addView(TextView(this).apply {
-                text = "✓  Apply rewrite"
-                gravity = Gravity.CENTER
-                textSize = 14f
-                setTextColor(Color.WHITE)
-                background = rounded(Color.rgb(21, 148, 96))
-                setPadding(dp(8), dp(12), dp(8), dp(12))
-                setOnClickListener {
-                    val edit = SuggestionDiff.Edit(styleRange.first, styleRange.last + 1,
-                        styleOriginal.substring(styleRange), preview)
-                    if (applyReplacement(styleOriginal, SuggestionDiff.apply(styleOriginal, edit), edit)) {
-                        stylePreview = null
-                        expanded = false
-                        handler.postDelayed(refresh, 300)
-                    } else feedback?.text = "This editor does not support direct replacement."
-                }
-            })
-            panel.addView(tab("Discard rewrite", false) {
-                stylePreview = null
-                renderAssistantPanel()
-            })
-        }
-        feedback?.setTextColor(muted)
+        panel.addView(tab("Open Gemini Nano for rewriting", true) { openNanoReview() })
         resizeBubble()
     }
 
