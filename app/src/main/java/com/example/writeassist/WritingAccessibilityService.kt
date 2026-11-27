@@ -1,6 +1,9 @@
 package com.example.writeassist
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.InputMethod
+import android.os.Build
+import android.view.inputmethod.EditorInfo
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
@@ -23,6 +26,56 @@ import java.util.concurrent.Executors
 class WritingAccessibilityService : AccessibilityService() {
     private val handler = Handler(Looper.getMainLooper())
     private var manager: WindowManager? = null
+    private var inputMethod: InputMethod? = null
+    private var inputSnapshot: InputSnapshot? = null
+
+    private data class InputSnapshot(val packageName: String, val text: String, val offset: Int, val caret: Int)
+
+    @android.annotation.TargetApi(33)
+    override fun onCreateInputMethod(): InputMethod =
+        object : InputMethod(this) {
+            override fun onStartInput(attribute: EditorInfo, restarting: Boolean) {
+                if (inputSnapshot != null) clearSession()
+                scheduleInputRefresh()
+            }
+
+            override fun onFinishInput() {
+                if (inputSnapshot != null) clearSession()
+                scheduleInputRefresh()
+            }
+
+            override fun onUpdateSelection(oldSelStart: Int, oldSelEnd: Int, newSelStart: Int,
+                newSelEnd: Int, candidatesStart: Int, candidatesEnd: Int) {
+                scheduleInputRefresh()
+            }
+        }.also { inputMethod = it }
+
+    private fun scheduleInputRefresh() {
+        handler.removeCallbacks(refresh)
+        handler.postDelayed(refresh, 180)
+    }
+
+    @android.annotation.TargetApi(33)
+    private fun readInputSnapshot(): InputSnapshot? {
+        if (Build.VERSION.SDK_INT < 33) return null
+        val method = inputMethod ?: return null
+        if (!method.currentInputStarted) return null
+        val info = method.currentInputEditorInfo ?: return null
+        val pkg = info.packageName ?: return null
+        val input = info.inputType
+        val variation = input and InputType.TYPE_MASK_VARIATION
+        if (pkg.isBlank() || pkg == packageName ||
+            input and InputType.TYPE_MASK_CLASS != InputType.TYPE_CLASS_TEXT ||
+            variation in listOf(InputType.TYPE_TEXT_VARIATION_PASSWORD,
+                InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD, InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD,
+                InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS, InputType.TYPE_TEXT_VARIATION_WEB_EMAIL_ADDRESS) ||
+            info.imeOptions and EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING != 0) return null
+        val snapshot = method.currentInputConnection?.getSurroundingText(2501, 2501, 0) ?: return null
+        val text = snapshot.text.toString()
+        if (snapshot.offset < 0 || text.length > 2500 || snapshot.selectionEnd !in 0..text.length) return null
+        return InputSnapshot(pkg, text, snapshot.offset, snapshot.selectionEnd)
+    }
+
     private var editor: AccessibilityNodeInfo? = null
     private val settings by lazy { getSharedPreferences("settings", MODE_PRIVATE) }
     private val settingsChanged = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
@@ -143,6 +196,7 @@ class WritingAccessibilityService : AccessibilityService() {
     private fun clearSession() {
         editor?.recycle()
         editor = null
+        inputSnapshot = null
         generation++
         styleGeneration++
         styleBusy = false
@@ -178,19 +232,28 @@ class WritingAccessibilityService : AccessibilityService() {
             clearSession()
             return
         }
-        val node = eventEditor ?: editableNode() ?: run { clearSession(); return }
-        val pkg = node.packageName?.toString().orEmpty()
-        val value = if (node.isShowingHintText) "" else node.text?.toString().orEmpty()
+        var node = eventEditor ?: editableNode()
+        val input = if (node == null || node.actionList.none { it.id == AccessibilityNodeInfo.ACTION_SET_TEXT }) {
+            readInputSnapshot()?.takeIf { node == null || it.packageName == node?.packageName?.toString() }
+        } else null
+        if (input != null) {
+            node?.recycle()
+            node = null
+        }
+        val pkg = input?.packageName ?: node?.packageName?.toString().orEmpty()
+        val value = input?.text ?: node?.takeUnless { it.isShowingHintText }?.text?.toString().orEmpty()
         if (pkg.isBlank() || value.length > 2500) {
-            node.recycle()
+            node?.recycle()
             clearSession()
             return
         }
-        val changedEditor = node != editor
+        val changedEditor = node != editor || (input == null) != (inputSnapshot == null) ||
+            input?.packageName != inputSnapshot?.packageName || input?.offset != inputSnapshot?.offset
         if (changedEditor) {
             clearSession()
             editor = node
-        } else node.recycle()
+        } else node?.recycle()
+        inputSnapshot = input
         val changed = changedEditor || value != lastText
         if (changed) {
             sentenceSuggestion = null
@@ -238,10 +301,7 @@ class WritingAccessibilityService : AccessibilityService() {
             handler.post {
                 if (generation != requestGeneration || lastText != source ||
                     lastPackage != pkg || (!force && !prefs.getBoolean("auto_ai", false))) return@post
-                val node = editableNode() ?: run { checkButton?.text = "Check grammar with AI"; return@post }
-                val stillSafe = node == editor && !node.isShowingHintText &&
-                    node.text?.toString() == source && node.packageName?.toString() == pkg
-                node.recycle()
+                val stillSafe = liveCaret(source) != null
                 if (!stillSafe) { checkButton?.text = "Check grammar with AI"; return@post }
                 checkButton?.text = "Check with AI again  ›"
                 if (result.text != source && result.text.isNotBlank()) {
@@ -500,12 +560,23 @@ class WritingAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun currentSentence(source: String): IntRange? {
+    private fun liveCaret(source: String): Int? {
+        val previous = inputSnapshot
+        if (previous != null) {
+            val live = readInputSnapshot() ?: return null
+            return live.caret.takeIf {
+                live.packageName == previous.packageName && live.offset == previous.offset && live.text == source
+            }
+        }
         val node = editableNode() ?: return null
-        val caret = try {
+        return try {
             if (node != editor || node.text?.toString() != source) return null
             node.textSelectionEnd
         } finally { node.recycle() }
+    }
+
+    private fun currentSentence(source: String): IntRange? {
+        val caret = liveCaret(source) ?: return null
         if (caret !in 0..source.length) return null
         val sentences = java.text.BreakIterator.getSentenceInstance(java.util.Locale.ENGLISH)
         sentences.setText(source)
@@ -653,6 +724,7 @@ class WritingAccessibilityService : AccessibilityService() {
         edit: SuggestionDiff.Edit? = null
     ): Boolean {
         if (!AssistantControls.enabled(this) || original == replacement) return false
+        if (inputSnapshot != null) return applyThroughInput(original, replacement, edit)
         val node = editableNode() ?: return false
         return try {
             if (node != editor || node.isShowingHintText || node.text?.toString() != original ||
@@ -674,6 +746,26 @@ class WritingAccessibilityService : AccessibilityService() {
             }
             changed
         } finally { node.recycle() }
+    }
+
+    @android.annotation.TargetApi(33)
+    private fun applyThroughInput(original: String, replacement: String, edit: SuggestionDiff.Edit?): Boolean {
+        if (Build.VERSION.SDK_INT < 33) return false
+        val previous = inputSnapshot ?: return false
+        val connection = inputMethod?.currentInputConnection ?: return false
+        val live = readInputSnapshot() ?: return false
+        if (live.text != original || live.packageName != previous.packageName ||
+            live.offset != previous.offset) return false
+        val start = (edit?.start ?: 0) + live.offset
+        val end = (edit?.end ?: original.length) + live.offset
+        connection.setSelection(start, end)
+        val selected = connection.getSurroundingText(0, 0, 0) ?: return false
+        if (selected.offset < 0 || selected.offset + selected.selectionStart != start ||
+            selected.offset + selected.selectionEnd != end ||
+            selected.text.toString() != (edit?.before ?: original)) return false
+        connection.commitText(edit?.after ?: replacement, 1, null)
+        scheduleInputRefresh()
+        return true
     }
 
     override fun onInterrupt() { clearSession() }
