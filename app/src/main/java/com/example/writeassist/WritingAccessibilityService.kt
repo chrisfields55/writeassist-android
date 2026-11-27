@@ -110,6 +110,13 @@ class WritingAccessibilityService : AccessibilityService() {
     private var bubbleY = -1
     private var expanded = false
     private var sentenceSuggestion: SuggestionDiff.Edit? = null
+    private data class AcceptedEdit(
+        val expectedText: String,
+        val remaining: List<SuggestionDiff.Edit>,
+        val rephrase: SuggestionDiff.Edit?,
+        val expiresAt: Long
+    )
+    private var acceptedEdit: AcceptedEdit? = null
     private var activeEdits: List<SuggestionDiff.Edit> = emptyList()
     private var lastText = ""
     private var lastPackage = ""
@@ -204,6 +211,7 @@ class WritingAccessibilityService : AccessibilityService() {
         lastRequestedKey = ""
         lastText = ""
         lastPackage = ""
+        acceptedEdit = null
         activeEdits = emptyList()
         sentenceSuggestion = null
         ignoredSuggestions.clear()
@@ -255,6 +263,10 @@ class WritingAccessibilityService : AccessibilityService() {
         } else node?.recycle()
         inputSnapshot = input
         val changed = changedEditor || value != lastText
+        val accepted = acceptedEdit?.takeIf {
+            changed && value == it.expectedText && android.os.SystemClock.uptimeMillis() <= it.expiresAt
+        }
+        if (changed) acceptedEdit = null
         if (changed) {
             sentenceSuggestion = null
             styleGeneration++
@@ -269,7 +281,15 @@ class WritingAccessibilityService : AccessibilityService() {
         val needsOverlay = bubble == null
         showBubble()
         if (changed || needsOverlay) {
-            activeEdits = LocalCorrections.suggestions(value)
+            val local = LocalCorrections.suggestions(value)
+            activeEdits = if (accepted == null) local else {
+                val remaining = accepted.remaining
+                (remaining + local.filter { candidate ->
+                    remaining.none { it.start == candidate.start ||
+                        it.start < candidate.end && candidate.start < it.end }
+                }).sortedBy { it.start }
+            }
+            if (accepted != null) sentenceSuggestion = accepted.rephrase
             renderAssistantPanel()
         }
         if (changed || !settings.getBoolean("auto_ai", false)) handler.removeCallbacks(autoCheck)
@@ -445,9 +465,18 @@ class WritingAccessibilityService : AccessibilityService() {
                     setOnClickListener {
                         if (snapshotGeneration != generation) return@setOnClickListener
                         val replacement = SuggestionDiff.apply(snapshot, edit)
+                        val remaining = activeEdits.filter { suggestionId(it) !in ignoredSuggestions }
+                            .mapNotNull { SuggestionDiff.afterAccepting(it, edit, replacement) }
+                        val rephrase = sentenceSuggestion?.takeUnless { suggestionId(it) in ignoredSuggestions }
+                            ?.let { SuggestionDiff.afterAccepting(it, edit, replacement) }
+                        acceptedEdit = AcceptedEdit(replacement, remaining, rephrase,
+                            android.os.SystemClock.uptimeMillis() + 3000)
                         if (applyReplacement(snapshot, replacement, edit)) {
-                            updateFromFocus()
-                        } else feedback?.text = "The editor changed or could not apply this correction."
+                            scheduleInputRefresh()
+                        } else {
+                            acceptedEdit = null
+                            feedback?.text = "The editor changed or could not apply this correction."
+                        }
                     }
                 }, LinearLayout.LayoutParams(0, dp(44), 1f))
                 card.addView(actions)

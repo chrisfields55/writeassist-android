@@ -47,6 +47,21 @@ object SuggestionDiff {
         return edits
     }
 
+    fun afterAccepting(candidate: Edit, accepted: Edit, updated: String): Edit? {
+        if (candidate == accepted || candidate.start == accepted.start) return null
+        val shift = accepted.after.length - (accepted.end - accepted.start)
+        val moved = when {
+            candidate.end <= accepted.start -> candidate
+            candidate.start >= accepted.end ->
+                candidate.copy(start = candidate.start + shift, end = candidate.end + shift)
+            else -> return null
+        }
+        return moved.takeIf {
+            it.start in 0..updated.length && it.end in it.start..updated.length &&
+                updated.substring(it.start, it.end) == it.before
+        }
+    }
+
     fun mapOffset(offset: Int, edit: Edit?, length: Int): Int {
         val mapped = when {
             edit == null -> offset
