@@ -420,6 +420,29 @@ class WritingAccessibilityService : AccessibilityService() {
             }
             val snapshot = lastText
             val snapshotGeneration = generation
+            val compatible = mutableListOf<SuggestionDiff.Edit>()
+            // Prefer the individual proofreading edits when a rewrite covers the same text.
+            for (candidate in visible) {
+                if (compatible.none { it.start == candidate.start ||
+                    it.start < candidate.end && candidate.start < it.end }) compatible.add(candidate)
+            }
+            if (compatible.size > 1) {
+                panel.addView(tab("Accept ${compatible.size} compatible suggestions", true) {
+                    if (snapshotGeneration != generation || visibleSuggestions() != visible) return@tab
+                    val start = compatible.minOf { it.start }
+                    val end = compatible.maxOf { it.end }
+                    val revised = compatible.sortedByDescending { it.start }.fold(snapshot) { text, edit ->
+                        SuggestionDiff.apply(text, edit)
+                    }
+                    val combined = SuggestionDiff.Edit(start, end, snapshot.substring(start, end),
+                        revised.substring(start, revised.length - (snapshot.length - end)))
+                    if (applyReplacement(snapshot, revised, combined)) {
+                        scheduleInputRefresh()
+                    } else {
+                        feedback?.text = "The editor changed or could not apply these corrections."
+                    }
+                })
+            }
             for (edit in visible) {
                 val card = LinearLayout(this).apply {
                     orientation = LinearLayout.VERTICAL
