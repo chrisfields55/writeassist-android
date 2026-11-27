@@ -229,7 +229,7 @@ class MainActivity : Activity() {
         val prefs = getSharedPreferences("settings", MODE_PRIVATE)
         val panel = vertical().apply { setPadding(dp(20), dp(12), dp(20), dp(12)) }
         panel.addView(label("Advanced writing runs on this device with Gemini Nano.", 13f, muted))
-        panel.addView(Button(this).apply {
+        panel.addView(android.widget.Button(this).apply {
             text = "Set up Gemini Nano"
             setOnClickListener {
                 isEnabled = false
