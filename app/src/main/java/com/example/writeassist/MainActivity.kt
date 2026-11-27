@@ -29,9 +29,6 @@ import java.util.concurrent.Executors
 class MainActivity : Activity() {
     private lateinit var input: EditText
     private lateinit var output: EditText
-    private lateinit var apiKey: EditText
-    private lateinit var endpoint: EditText
-    private lateinit var model: EditText
     private lateinit var mode: Spinner
     private lateinit var status: TextView
     private lateinit var runButton: Button
@@ -221,39 +218,32 @@ class MainActivity : Activity() {
             })
         }
         addSpace(root, 18)
-        root.addView(label("WriteAssist • Automatic AI is optional", 12f, muted).apply {
+        root.addView(label("WriteAssist • On-device review", 12f, muted).apply {
             gravity = Gravity.CENTER
         })
         setContentView(scroll)
 
-        endpoint = EditText(this).apply {
-            setText(prefs.getString("endpoint", "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"))
-        }
-        model = EditText(this).apply {
-            setText(prefs.getString("model", "gemini-2.5-flash"))
-        }
-        apiKey = EditText(this).apply {
-            setText(ApiCredentials.load(this@MainActivity) ?: "")
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-        }
     }
 
     private fun showSettings() {
         val prefs = getSharedPreferences("settings", MODE_PRIVATE)
         val panel = vertical().apply { setPadding(dp(20), dp(12), dp(20), dp(12)) }
-        panel.addView(label("Gemini API endpoint (managed automatically)", 13f, muted, true))
-        (endpoint.parent as? ViewGroup)?.removeView(endpoint)
-        endpoint.isEnabled = false
-        panel.addView(endpoint)
-        addSpace(panel, 12)
-        panel.addView(label("Preferred Gemini model (automatic fallback enabled)", 13f, muted, true))
-        (model.parent as? ViewGroup)?.removeView(model)
-        panel.addView(model)
-        addSpace(panel, 12)
-        panel.addView(label("API key (encrypted on device)", 13f, muted, true))
-        (apiKey.parent as? ViewGroup)?.removeView(apiKey)
-        panel.addView(apiKey)
-        addSpace(panel, 10)
+        panel.addView(label("Advanced writing runs on this device with Gemini Nano.", 13f, muted))
+        panel.addView(Button(this).apply {
+            text = "Set up Gemini Nano"
+            setOnClickListener {
+                isEnabled = false
+                text = "Checking Gemini Nano…"
+                worker.execute {
+                    val message = GeminiFallback.prepare()
+                    main.post {
+                        isEnabled = true
+                        text = "Set up Gemini Nano"
+                        Toast.makeText(this@MainActivity, message, Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+        })
         panel.addView(label("Appearance", 13f, muted, true))
         val appearance = Spinner(this).apply {
             adapter = ArrayAdapter(this@MainActivity,
@@ -267,11 +257,6 @@ class MainActivity : Activity() {
         }
         panel.addView(appearance)
         addSpace(panel, 12)
-        val auto = Switch(this).apply {
-            text = "Automatically check writing with AI"
-            textSize = 14f
-            isChecked = prefs.getBoolean("auto_ai", false)
-        }
         val enabled = Switch(this).apply {
             text = "Floating writing assistant"
             isChecked = AssistantControls.enabled(this@MainActivity)
@@ -283,23 +268,17 @@ class MainActivity : Activity() {
         addSpace(panel, 14)
         panel.addView(enabled)
         panel.addView(notification)
-        panel.addView(auto)
         addSpace(panel, 10)
-        panel.addView(label("When enabled, supported text fields are checked after a pause in typing. Text is sent to Google Gemini automatically. Suggestions are never applied without your approval. Password fields are excluded. You may disable this at any time.", 12f, muted))
         val parent = panel.parent
         if (parent is ViewGroup) parent.removeView(panel)
         android.app.AlertDialog.Builder(this)
             .setTitle("WriteAssist settings")
             .setView(android.widget.ScrollView(this).apply { addView(panel) })
             .setPositiveButton("Save settings") { _, _ ->
-                prefs.edit().putString("endpoint", endpoint.text.toString().trim())
-                    .putString("model", model.text.toString().trim())
-                    .putBoolean("auto_ai", auto.isChecked)
+                prefs.edit().remove("endpoint").remove("model").remove("auto_ai")
                     .putBoolean(AssistantControls.NOTIFICATION, notification.isChecked)
                     .putString("appearance", arrayOf("system", "light", "dark")[appearance.selectedItemPosition]).apply()
                 AssistantControls.setEnabled(this, enabled.isChecked)
-                try { ApiCredentials.save(this, apiKey.text.toString().trim()) }
-                catch (_: Exception) { Toast.makeText(this, "Unable to store API key securely", Toast.LENGTH_LONG).show() }
                 if (notification.isChecked && android.os.Build.VERSION.SDK_INT >= 33 &&
                     checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) !=
                     android.content.pm.PackageManager.PERMISSION_GRANTED) {
@@ -312,7 +291,6 @@ class MainActivity : Activity() {
 
     private fun improve() {
         val source = input.text.toString()
-        val key = apiKey.text.toString().trim()
         if (source.isBlank()) {
             status.text = "Enter some text to improve."
             return
@@ -331,7 +309,7 @@ class MainActivity : Activity() {
         output.setText("")
         status.text = "Processing…"
         worker.execute {
-            val result = GeminiFallback.review(this@MainActivity, source, instruction)
+            val result = GeminiFallback.review(source, instruction)
             main.post {
                 runButton.isEnabled = true
                 output.setText(result.text)
