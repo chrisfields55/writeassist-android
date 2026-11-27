@@ -15,9 +15,11 @@ object GeminiFallback {
         val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
         val key = ApiCredentials.load(context)
         if (key.isNullOrBlank()) return Result(local, "Local", "Add a Gemini API key in Settings for AI corrections.")
-        val configured = prefs.getString("model", "gemini-2.5-flash").orEmpty()
-        val primary = configured.takeIf { it.startsWith("gemini-") } ?: "gemini-2.5-flash"
-        val candidates = listOf("gemini-2.5-flash", primary, "gemini-2.5-flash-lite", "gemini-2.0-flash")
+        val defaultModel = "gemini-3.6-flash"
+        val configured = prefs.getString("model", defaultModel).orEmpty()
+            .trim().lowercase().removePrefix("models/").replace(Regex("\\s+"), "-")
+        val primary = configured.takeIf { it.matches(Regex("gemini-[a-z0-9.-]+")) } ?: defaultModel
+        val candidates = listOf(primary, defaultModel, "gemini-3.5-flash-lite", "gemini-2.5-flash")
             .distinct()
         var lastStatus = 0
         var lastError = ""
@@ -60,7 +62,7 @@ object GeminiFallback {
             401, 403 -> "Gemini authentication failed. Check the API key."
             429 -> "Gemini quota reached. Using offline corrections."
             400 -> "Gemini rejected the request. Check the selected model. " + lastError
-            404 -> "Gemini model not found. Check the model setting."
+            404 -> "None of the attempted Gemini models are available for this API key. Using offline corrections."
             else -> "Gemini is busy or unreachable. " + lastError
         }
         return Result(local, "Local", reason)
